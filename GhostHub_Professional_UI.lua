@@ -1433,7 +1433,7 @@ local function clearContainer(container)
     end
 
     for _, child in ipairs(container:GetChildren()) do
-        if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+        if child:GetAttribute("GhostDynamic") == true then
             child:Destroy()
         end
     end
@@ -2054,7 +2054,7 @@ local function renderActionReference(parent, actionId, prefix)
         return
     end
 
-    createActionButton(parent, {
+    local row = createActionButton(parent, {
         id = prefix .. ":" .. actionId,
         text = action.text,
         category = action.category,
@@ -2064,6 +2064,8 @@ local function renderActionReference(parent, actionId, prefix)
             return action.callback()
         end
     })
+
+    row:SetAttribute("GhostDynamic", true)
 end
 
 local function refreshFavorites()
@@ -2084,6 +2086,7 @@ local function refreshFavorites()
         })
 
         bindTheme(empty, "TextColor3", "muted")
+        empty:SetAttribute("GhostDynamic", true)
         return
     end
 
@@ -2110,6 +2113,7 @@ local function refreshRecent()
         })
 
         bindTheme(empty, "TextColor3", "muted")
+        empty:SetAttribute("GhostDynamic", true)
         return
     end
 
@@ -2611,6 +2615,8 @@ do
                         Parent = Logs.ListParent
                     })
 
+                    row:SetAttribute("GhostDynamic", true)
+
                     if entry.level == "ERROR" then
                         bindTheme(row, "TextColor3", "danger")
                     elseif entry.level == "WARN" then
@@ -2815,7 +2821,43 @@ do
             SidebarCollapsed = enabled
             saveConfig()
 
-            SidebarToggle:Activate()
+            if SidebarCollapsed then
+                tween(Sidebar, 0.16, {
+                    Size = UDim2.new(0, 64, 1, -54)
+                })
+
+                tween(Content, 0.16, {
+                    Position = UDim2.fromOffset(64, 54),
+                    Size = UDim2.new(1, -64, 1, -54)
+                })
+
+                SearchBox.Visible = false
+                UserCard.Visible = false
+
+                for _, button in pairs(Tabs) do
+                    button.Text = string.sub(button.Name, 1, 1)
+                    button.TextXAlignment = Enum.TextXAlignment.Center
+                end
+            else
+                tween(Sidebar, 0.16, {
+                    Size = UDim2.new(0, 194, 1, -54)
+                })
+
+                tween(Content, 0.16, {
+                    Position = UDim2.fromOffset(194, 54),
+                    Size = UDim2.new(1, -194, 1, -54)
+                })
+
+                SearchBox.Visible = true
+                UserCard.Visible = true
+
+                for name, button in pairs(Tabs) do
+                    button.Text = "   " .. (
+                        Pages[name] and Pages[name].Title.Text or name
+                    )
+                    button.TextXAlignment = Enum.TextXAlignment.Left
+                end
+            end
         end
     })
 
@@ -3551,14 +3593,6 @@ setPage = function(name)
     end
 
     return result
-end
-
--- Reconnect tabs to wrapped setPage
-for name, button in pairs(Tabs) do
-    -- Original connections are harmless; wrapped function is also called here.
-    GlobalMaid:Give(button.MouseButton1Click:Connect(function()
-        setPage(name)
-    end))
 end
 
 --==================================================

@@ -2583,6 +2583,503 @@ do
 end
 
 --==================================================
+-- PROFILES / DIAGNOSTICS / CHANGELOG
+--==================================================
+
+local Monitor = {
+    FPS = 0,
+    FPSMin = math.huge,
+    FPSMax = 0,
+    Ping = "N/A",
+    Memory = "N/A",
+    Start = os.clock()
+}
+
+local Profiles = {
+    Default = {
+        Theme = "Purple",
+        Scale = 1,
+        ReduceMotion = false,
+        LowGraphics = false,
+        HideEffects = false
+    },
+    Mobile = {
+        Theme = "Ocean",
+        Scale = 0.85,
+        ReduceMotion = true,
+        LowGraphics = false,
+        HideEffects = false
+    },
+    Performance = {
+        Theme = "Mono",
+        Scale = 0.85,
+        ReduceMotion = true,
+        LowGraphics = true,
+        HideEffects = true
+    },
+    Visual = {
+        Theme = "Crimson",
+        Scale = 1.05,
+        ReduceMotion = false,
+        LowGraphics = false,
+        HideEffects = false
+    },
+    Accessibility = {
+        Theme = "Emerald",
+        Scale = 1.15,
+        ReduceMotion = true,
+        LowGraphics = false,
+        HideEffects = false
+    }
+}
+
+local function applyProfile(name)
+    local profile = Profiles[name]
+
+    if not profile then
+        return false, "Perfil não encontrado."
+    end
+
+    Config.ActiveProfile = name
+    Config.Theme = profile.Theme
+    Config.Scale = profile.Scale
+    Config.ReduceMotion = profile.ReduceMotion
+
+    applyTheme(profile.Theme)
+    UIScale.Scale = profile.Scale
+    setLowGraphics(profile.LowGraphics)
+    setHideEffects(profile.HideEffects)
+
+    Config.LowGraphics = profile.LowGraphics
+    Config.HideEffects = profile.HideEffects
+
+    saveConfig()
+    pushLog("INFO", "Perfil aplicado: " .. name)
+
+    return true, "Perfil " .. name .. " aplicado."
+end
+
+local function buildDiagnosticReport()
+    local viewport = Vector2.new(0, 0)
+
+    pcall(function()
+        if workspace.CurrentCamera then
+            viewport = workspace.CurrentCamera.ViewportSize
+        end
+    end)
+
+    local activeTasks = 0
+    for _ in pairs(TaskManager.Tasks) do
+        activeTasks = activeTasks + 1
+    end
+
+    local disabledGuards = 0
+    for _ in pairs(Guard.Disabled) do
+        disabledGuards = disabledGuards + 1
+    end
+
+    local lines = {
+        "GHOST HUB DIAGNOSTIC REPORT",
+        "Version: " .. VERSION,
+        "Build: " .. BUILD,
+        "ConfigVersion: " .. tostring(Config.ConfigVersion),
+        "Profile: " .. tostring(Config.ActiveProfile),
+        "Theme: " .. tostring(Config.Theme),
+        "Player: " .. LocalPlayer.Name,
+        "PlaceId: " .. tostring(game.PlaceId),
+        "JobId: " .. tostring(game.JobId),
+        ("Viewport: %dx%d"):format(viewport.X, viewport.Y),
+        "FPS: " .. tostring(Monitor.FPS),
+        "FPS Min: " .. tostring(Monitor.FPSMin == math.huge and 0 or Monitor.FPSMin),
+        "FPS Max: " .. tostring(Monitor.FPSMax),
+        "Ping: " .. tostring(Monitor.Ping),
+        "Memory: " .. tostring(Monitor.Memory),
+        "Uptime: " .. tostring(math.floor(os.clock() - Monitor.Start)) .. "s",
+        "Active Tasks: " .. tostring(activeTasks),
+        "Circuit Breakers: " .. tostring(disabledGuards),
+        "Actions Total: " .. tostring(ActionStats.Total),
+        "Actions Success: " .. tostring(ActionStats.Success),
+        "Actions Failed: " .. tostring(ActionStats.Failed),
+        "Logs: " .. tostring(#Logs.Items),
+        "writefile: " .. tostring(Capabilities.writefile),
+        "readfile: " .. tostring(Capabilities.readfile),
+        "setclipboard: " .. tostring(Capabilities.setclipboard),
+        "getclipboard: " .. tostring(Capabilities.getclipboard)
+    }
+
+    return table.concat(lines, "\n")
+end
+
+do
+    local scroll = Pages.Profiles.Scroll
+
+    local presets = createSection(
+        scroll,
+        "Presets",
+        "Perfis prontos para diferentes tipos de uso."
+    )
+
+    for _, profileName in ipairs({
+        "Default",
+        "Mobile",
+        "Performance",
+        "Visual",
+        "Accessibility"
+    }) do
+        createActionButton(presets, {
+            id = "profile." .. string.lower(profileName),
+            text = "Aplicar " .. profileName,
+            category = "Profiles",
+            callback = function()
+                local ok, message = applyProfile(profileName)
+
+                if not ok then
+                    error(message)
+                end
+
+                notify("Profiles", message, "success", 3)
+                return message
+            end
+        })
+    end
+
+    local transfer = createSection(
+        scroll,
+        "Import / Export",
+        "Backup e transferência da configuração em JSON."
+    )
+
+    createActionButton(transfer, {
+        id = "profile.export",
+        text = "Exportar config para clipboard",
+        category = "Profiles",
+        favorite = false,
+        callback = function()
+            if not Capabilities.setclipboard then
+                return "setclipboard não está disponível."
+            end
+
+            local encoded = HttpService:JSONEncode(Config)
+            setclipboard(encoded)
+            return "Configuração exportada."
+        end
+    })
+
+    createActionButton(transfer, {
+        id = "profile.import",
+        text = "Importar config do clipboard",
+        category = "Profiles",
+        favorite = false,
+        callback = function()
+            if not Capabilities.getclipboard then
+                return "getclipboard não está disponível."
+            end
+
+            local raw = getclipboard()
+
+            if type(raw) ~= "string" or raw == "" then
+                return "Clipboard vazio."
+            end
+
+            local ok, decoded = pcall(function()
+                return HttpService:JSONDecode(raw)
+            end)
+
+            if not ok or type(decoded) ~= "table" then
+                error("JSON inválido no clipboard.")
+            end
+
+            Config = mergeDefaults(decoded, Defaults)
+            Config.ConfigVersion = 3
+            saveConfig()
+
+            applyTheme(Config.Theme)
+            UIScale.Scale = tonumber(Config.Scale) or 1
+            setLowGraphics(Config.LowGraphics == true)
+            setHideEffects(Config.HideEffects == true)
+
+            return "Configuração importada. Alguns controles visuais atualizam ao reabrir."
+        end
+    })
+
+    createActionButton(transfer, {
+        id = "profile.backup",
+        text = "Criar backup local da config",
+        category = "Profiles",
+        favorite = false,
+        callback = function()
+            if not Capabilities.writefile then
+                return "writefile não está disponível."
+            end
+
+            local encoded = HttpService:JSONEncode(Config)
+            writefile(
+                "GhostHub_Professional_V3_backup.json",
+                encoded
+            )
+
+            return "Backup local criado."
+        end
+    })
+
+    local active = createSection(
+        scroll,
+        "Current",
+        "Estado do perfil atual."
+    )
+
+    createInfo(active, "Perfil", function()
+        return Config.ActiveProfile
+    end)
+
+    createInfo(active, "Tema", function()
+        return Config.Theme
+    end)
+
+    createInfo(active, "Escala", function()
+        return math.floor((tonumber(Config.Scale) or 1) * 100) .. "%"
+    end)
+end
+
+do
+    local scroll = Pages.Diagnostics.Scroll
+
+    local live = createSection(
+        scroll,
+        "Health",
+        "Métricas de saúde e desempenho."
+    )
+
+    createInfo(live, "FPS", function()
+        return Monitor.FPS
+    end)
+
+    createInfo(live, "FPS Min", function()
+        return Monitor.FPSMin == math.huge and 0 or Monitor.FPSMin
+    end)
+
+    createInfo(live, "FPS Max", function()
+        return Monitor.FPSMax
+    end)
+
+    createInfo(live, "Ping", function()
+        return Monitor.Ping
+    end)
+
+    createInfo(live, "Memory", function()
+        return Monitor.Memory
+    end)
+
+    createInfo(live, "Uptime", function()
+        return math.floor(os.clock() - Monitor.Start) .. "s"
+    end)
+
+    createInfo(live, "Ações", function()
+        return ("%d total / %d ok / %d erro"):format(
+            ActionStats.Total,
+            ActionStats.Success,
+            ActionStats.Failed
+        )
+    end)
+
+    createInfo(live, "Tasks ativas", function()
+        local count = 0
+        for _ in pairs(TaskManager.Tasks) do
+            count = count + 1
+        end
+        return count
+    end)
+
+    createInfo(live, "Circuit breakers", function()
+        local count = 0
+        for _ in pairs(Guard.Disabled) do
+            count = count + 1
+        end
+        return count
+    end)
+
+    local tools = createSection(
+        scroll,
+        "Diagnostic Tools",
+        "Relatório técnico e testes de regressão."
+    )
+
+    createActionButton(tools, {
+        id = "diag.copyreport",
+        text = "Copiar relatório técnico",
+        category = "Diagnostics",
+        favorite = false,
+        callback = function()
+            local report = buildDiagnosticReport()
+
+            if Capabilities.setclipboard then
+                setclipboard(report)
+                return "Relatório copiado."
+            end
+
+            pushLog("INFO", report)
+            return "Clipboard indisponível; relatório enviado aos logs."
+        end
+    })
+
+    createActionButton(tools, {
+        id = "diag.extendedtest",
+        text = "Executar teste estendido",
+        category = "Diagnostics",
+        favorite = false,
+        callback = function()
+            local passed = 0
+            local failed = 0
+
+            local function test(name, callback)
+                local ok, result = pcall(callback)
+
+                if ok and result ~= false then
+                    passed = passed + 1
+                    pushLog("INFO", "Extended Test PASS: " .. name)
+                else
+                    failed = failed + 1
+                    pushLog("ERROR", "Extended Test FAIL: " .. name)
+                end
+            end
+
+            test("ScreenGui parent", function()
+                return ScreenGui.Parent ~= nil
+            end)
+
+            test("Main parent", function()
+                return Main.Parent ~= nil
+            end)
+
+            test("Pages registry", function()
+                return next(Pages) ~= nil
+            end)
+
+            test("Tabs registry", function()
+                return next(Tabs) ~= nil
+            end)
+
+            test("Themes registry", function()
+                return Themes[Config.Theme] ~= nil
+            end)
+
+            test("Config JSON encode/decode", function()
+                local raw = HttpService:JSONEncode(Config)
+                local decoded = HttpService:JSONDecode(raw)
+                return type(decoded) == "table"
+            end)
+
+            test("Character manager", function()
+                return CharacterState ~= nil
+            end)
+
+            test("Action registry", function()
+                return next(Actions) ~= nil
+            end)
+
+            test("Task manager", function()
+                return type(TaskManager.StopAll) == "function"
+            end)
+
+            test("Guard manager", function()
+                return type(Guard.Run) == "function"
+            end)
+
+            notify(
+                "Extended Test",
+                ("PASS %d | FAIL %d"):format(passed, failed),
+                failed == 0 and "success" or "warning",
+                5
+            )
+
+            return ("PASS %d | FAIL %d"):format(passed, failed)
+        end
+    })
+
+    createActionButton(tools, {
+        id = "diag.resetmetrics",
+        text = "Resetar métricas",
+        category = "Diagnostics",
+        favorite = false,
+        callback = function()
+            ActionStats.Total = 0
+            ActionStats.Success = 0
+            ActionStats.Failed = 0
+            ActionStats.PerAction = {}
+
+            Monitor.FPSMin = math.huge
+            Monitor.FPSMax = Monitor.FPS
+            Monitor.Start = os.clock()
+
+            return "Métricas resetadas."
+        end
+    })
+end
+
+do
+    local scroll = Pages.Changelog.Scroll
+
+    local current = createSection(
+        scroll,
+        "V3.0.0",
+        "Evolução estrutural baseada no checklist de 2.000 melhorias."
+    )
+
+    local changes = {
+        "Perfis Default, Mobile, Performance, Visual e Accessibility.",
+        "Importação, exportação e backup de configuração.",
+        "Diagnóstico técnico copiável.",
+        "Métricas de ações e saúde do painel.",
+        "Migração de configuração para schema V3.",
+        "Histórico persistente de comandos.",
+        "API interna preparada para módulos.",
+        "Self-test e testes estendidos.",
+        "Melhorias contínuas em mobile, erros e performance."
+    }
+
+    for _, line in ipairs(changes) do
+        local label = create("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham,
+            Text = "• " .. line,
+            TextWrapped = true,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = current
+        })
+
+        bindTheme(label, "TextColor3", "muted")
+    end
+
+    local history = createSection(
+        scroll,
+        "Previous",
+        "Principais marcos anteriores."
+    )
+
+    for _, line in ipairs({
+        "V2: Maid/cleanup, Task Manager, circuit breaker, temas, logs e restauração gráfica.",
+        "V1: base visual, páginas, pesquisa, sliders, toggles e interface mobile."
+    }) do
+        local label = create("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham,
+            Text = "• " .. line,
+            TextWrapped = true,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = history
+        })
+
+        bindTheme(label, "TextColor3", "muted")
+    end
+end
+
+--==================================================
 -- LOG PAGE
 --==================================================
 
@@ -2697,6 +3194,18 @@ end
 local function runCommand(raw)
     raw = tostring(raw or "")
 
+    local historyEntry = raw
+    if historyEntry ~= "" then
+        removeArrayValue(Config.CommandHistory, historyEntry)
+        table.insert(Config.CommandHistory, 1, historyEntry)
+
+        while #Config.CommandHistory > 25 do
+            table.remove(Config.CommandHistory)
+        end
+
+        saveConfig()
+    end
+
     if string.sub(raw, 1, 1) == "/" then
         raw = string.sub(raw, 2)
     end
@@ -2808,6 +3317,46 @@ end)
 registerCommand("resetguard", function()
     Guard:Reset()
     return "Circuit breaker resetado."
+end)
+
+registerCommand("help", function()
+    return "Comandos: /page /scale /theme /profile /diag /history /stopall /clearlogs /center /resetguard"
+end)
+
+registerCommand("profile", function(args)
+    local requested = string.lower(table.concat(args, " "))
+
+    for name in pairs(Profiles) do
+        if string.lower(name) == requested then
+            local ok, message = applyProfile(name)
+
+            if not ok then
+                error(message)
+            end
+
+            return message
+        end
+    end
+
+    return "Perfis: Default, Mobile, Performance, Visual, Accessibility"
+end)
+
+registerCommand("diag", function()
+    if Capabilities.setclipboard then
+        setclipboard(buildDiagnosticReport())
+        return "Relatório de diagnóstico copiado."
+    end
+
+    pushLog("INFO", buildDiagnosticReport())
+    return "Relatório enviado aos logs."
+end)
+
+registerCommand("history", function()
+    if #Config.CommandHistory == 0 then
+        return "Histórico vazio."
+    end
+
+    return table.concat(Config.CommandHistory, " | ")
 end)
 
 --==================================================
@@ -2926,7 +3475,7 @@ do
     local commandSection = createSection(
         scroll,
         "Command Palette",
-        "Comandos: /page, /scale, /theme, /stopall, /clearlogs, /center, /resetguard"
+        "Comandos: /help, /page, /scale, /theme, /profile, /diag, /history, /stopall, /clearlogs, /center, /resetguard"
     )
 
     local CommandBox = create("TextBox", {
@@ -3505,13 +4054,13 @@ end))
 -- PERFORMANCE MONITOR
 --==================================================
 
-local Monitor = {
-    FPS = 0,
-    FPSMin = math.huge,
-    FPSMax = 0,
-    Ping = "N/A",
-    Memory = "N/A",
-    Start = os.clock()
+Monitor = {
+    FPS = Monitor.FPS or 0,
+    FPSMin = Monitor.FPSMin or math.huge,
+    FPSMax = Monitor.FPSMax or 0,
+    Ping = Monitor.Ping or "N/A",
+    Memory = Monitor.Memory or "N/A",
+    Start = Monitor.Start or os.clock()
 }
 
 do

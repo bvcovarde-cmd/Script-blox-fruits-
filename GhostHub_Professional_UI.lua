@@ -660,29 +660,25 @@ local function restoreGraphics()
     GraphicsBackup.Objects = setmetatable({}, { __mode = "k" })
 end
 
-local function setLowGraphics(enabled)
-    GraphicsBackup.ActiveLow = enabled == true
-    Config.LowGraphics = GraphicsBackup.ActiveLow
+local function reapplyGraphicsModes()
+    restoreGraphics()
 
     if GraphicsBackup.ActiveLow or GraphicsBackup.ActiveEffects then
         task.spawn(refreshGraphicsMode)
-    else
-        restoreGraphics()
     end
+end
 
+local function setLowGraphics(enabled)
+    GraphicsBackup.ActiveLow = enabled == true
+    Config.LowGraphics = GraphicsBackup.ActiveLow
+    reapplyGraphicsModes()
     saveConfig()
 end
 
 local function setHideEffects(enabled)
     GraphicsBackup.ActiveEffects = enabled == true
     Config.HideEffects = GraphicsBackup.ActiveEffects
-
-    if GraphicsBackup.ActiveLow or GraphicsBackup.ActiveEffects then
-        task.spawn(refreshGraphicsMode)
-    else
-        restoreGraphics()
-    end
-
+    reapplyGraphicsModes()
     saveConfig()
 end
 
@@ -1537,15 +1533,17 @@ local function createActionButton(parent, options)
         })
     end)
 
-    Actions[id] = {
-        id = id,
-        text = text,
-        category = category,
-        callback = callback
-    }
+    if options.register ~= false then
+        Actions[id] = {
+            id = id,
+            text = text,
+            category = category,
+            callback = callback
+        }
 
-    if not arrayContains(ActionOrder, id) then
-        table.insert(ActionOrder, id)
+        if not arrayContains(ActionOrder, id) then
+            table.insert(ActionOrder, id)
+        end
     end
 
     return row
@@ -2059,6 +2057,7 @@ local function renderActionReference(parent, actionId, prefix)
         text = action.text,
         category = action.category,
         favorite = false,
+        register = false,
         callback = function()
             addRecent(actionId)
             return action.callback()
@@ -2771,17 +2770,27 @@ do
         "Tema, escala e animações."
     )
 
+    local themeValues = {
+        "Purple",
+        "Ocean",
+        "Emerald",
+        "Crimson",
+        "Mono"
+    }
+
+    local themeIndex = 1
+    for index, themeName in ipairs(themeValues) do
+        if themeName == Config.Theme then
+            themeIndex = index
+            break
+        end
+    end
+
     createDropdown(appearance, {
         text = "Tema",
         category = "Settings",
-        values = {
-            "Purple",
-            "Ocean",
-            "Emerald",
-            "Crimson",
-            "Mono"
-        },
-        defaultIndex = 1,
+        values = themeValues,
+        defaultIndex = themeIndex,
         callback = function(value)
             applyTheme(value)
             notify("Tema", value .. " aplicado.", "success", 2)

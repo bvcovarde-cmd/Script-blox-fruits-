@@ -263,6 +263,60 @@ end
 
 loadConfig()
 
+local function sanitizeConfig()
+    if type(Config) ~= "table" then
+        Config = deepCopy(Defaults)
+    end
+
+    mergeDefaults(Config, Defaults)
+
+    if type(Config.Theme) ~= "string" or not Themes then
+        -- Theme registry is defined later; final validation happens after it loads.
+        Config.Theme = type(Config.Theme) == "string" and Config.Theme or "Purple"
+    end
+
+    Config.Scale = math.clamp(tonumber(Config.Scale) or 1, 0.75, 1.25)
+
+    for _, key in ipairs({
+        "ReduceMotion",
+        "CompactSidebar",
+        "DevMode",
+        "LowGraphics",
+        "HideEffects"
+    }) do
+        Config[key] = Config[key] == true
+    end
+
+    for _, key in ipairs({
+        "PositionX",
+        "PositionY",
+        "FloatingX",
+        "FloatingY"
+    }) do
+        Config[key] = tonumber(Config[key]) or Defaults[key]
+    end
+
+    for _, key in ipairs({
+        "Favorites",
+        "Recent",
+        "CommandHistory"
+    }) do
+        if type(Config[key]) ~= "table" then
+            Config[key] = {}
+        end
+    end
+
+    if type(Config.LastPage) ~= "string" then
+        Config.LastPage = "Home"
+    end
+
+    if type(Config.ActiveProfile) ~= "string" then
+        Config.ActiveProfile = "Default"
+    end
+
+    Config.ConfigVersion = 3
+end
+
 local function migrateConfig()
     local version = tonumber(Config.ConfigVersion) or 1
 
@@ -278,6 +332,7 @@ local function migrateConfig()
 
     Config.ConfigVersion = 3
     mergeDefaults(Config, Defaults)
+    sanitizeConfig()
     saveConfig()
 end
 
@@ -358,6 +413,11 @@ local Themes = {
         danger = Color3.fromRGB(255, 95, 111)
     }
 }
+
+if not Themes[Config.Theme] then
+    Config.Theme = "Purple"
+    saveConfig()
+end
 
 local Theme = Themes[Config.Theme] or Themes.Purple
 local ThemeBindings = {}
@@ -2811,6 +2871,12 @@ do
 
             Config = mergeDefaults(decoded, Defaults)
             Config.ConfigVersion = 3
+            sanitizeConfig()
+
+            if not Themes[Config.Theme] then
+                Config.Theme = "Purple"
+            end
+
             saveConfig()
 
             applyTheme(Config.Theme)
@@ -4325,7 +4391,15 @@ do
         next(Pages) ~= nil,
         next(Tabs) ~= nil,
         Themes[Config.Theme] ~= nil,
-        LocalPlayer ~= nil
+        LocalPlayer ~= nil,
+        Profiles[Config.ActiveProfile] ~= nil,
+        Pages.Diagnostics ~= nil,
+        Pages.Profiles ~= nil,
+        Pages.Changelog ~= nil,
+        type(GhostHubAPI.GetDiagnosticReport) == "function",
+        type(TaskManager.StopAll) == "function",
+        type(Guard.Run) == "function",
+        type(Config.CommandHistory) == "table"
     }
 
     local passed = 0
@@ -4344,9 +4418,9 @@ end
 
 notify(
     "Ghost Hub V" .. VERSION,
-    "Interface carregada. Keyless, configurável e com recuperação de erros.",
+    "V3 carregada: keyless, perfis, diagnóstico, logs e recuperação de erros.",
     "success",
     4
 )
 
-pushLog("INFO", "Ghost Hub V2 carregado com sucesso.")
+pushLog("INFO", "Ghost Hub V3 carregado com sucesso.")

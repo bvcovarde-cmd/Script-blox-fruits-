@@ -270,9 +270,8 @@ local function sanitizeConfig()
 
     mergeDefaults(Config, Defaults)
 
-    if type(Config.Theme) ~= "string" or not Themes then
-        -- Theme registry is defined later; final validation happens after it loads.
-        Config.Theme = type(Config.Theme) == "string" and Config.Theme or "Purple"
+    if type(Config.Theme) ~= "string" then
+        Config.Theme = "Purple"
     end
 
     Config.Scale = math.clamp(tonumber(Config.Scale) or 1, 0.75, 1.25)
@@ -2710,6 +2709,11 @@ local Profiles = {
         HideEffects = false
     }
 }
+
+if not Profiles[Config.ActiveProfile] then
+    Config.ActiveProfile = "Default"
+    saveConfig()
+end
 
 local function applyProfile(name)
     local profile = Profiles[name]

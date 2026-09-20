@@ -1,5 +1,5 @@
 --[[
-    GHOST HUB PROFESSIONAL V2
+    GHOST HUB PROFESSIONAL V3
     Keyless | Mobile + PC | Roblox/Luau
 
     Arquitetura de interface e utilidades locais.
@@ -8,8 +8,8 @@
     Build: 2.0.0
 ]]
 
-local VERSION = "2.0.0"
-local BUILD = "2026.09.20"
+local VERSION = "3.0.0"
+local BUILD = "2026.09.20-v3"
 
 --// Services
 local Players = game:GetService("Players")
@@ -33,6 +33,8 @@ local Capabilities = {
     writefile = typeof(writefile) == "function",
     isfile = typeof(isfile) == "function",
     delfile = typeof(delfile) == "function",
+    getclipboard = typeof(getclipboard) == "function",
+    getgenv = typeof(getgenv) == "function",
 }
 
 local function getGuiParent()
@@ -151,6 +153,7 @@ pushLog("INFO", "Inicializando Ghost Hub V2.")
 --==================================================
 
 local Defaults = {
+    ConfigVersion = 3,
     Theme = "Purple",
     Scale = 1,
     LastPage = "Home",
@@ -162,6 +165,8 @@ local Defaults = {
     FloatingY = 260,
     Favorites = {},
     Recent = {},
+    CommandHistory = {},
+    ActiveProfile = "Default",
     DevMode = false,
     LowGraphics = false,
     HideEffects = false
@@ -257,6 +262,26 @@ local function saveConfig()
 end
 
 loadConfig()
+
+local function migrateConfig()
+    local version = tonumber(Config.ConfigVersion) or 1
+
+    if version < 2 then
+        Config.ReduceMotion = Config.ReduceMotion == true
+        Config.CompactSidebar = Config.CompactSidebar == true
+    end
+
+    if version < 3 then
+        Config.CommandHistory = Config.CommandHistory or {}
+        Config.ActiveProfile = Config.ActiveProfile or "Default"
+    end
+
+    Config.ConfigVersion = 3
+    mergeDefaults(Config, Defaults)
+    saveConfig()
+end
+
+migrateConfig()
 
 --==================================================
 -- THEMES
@@ -1184,6 +1209,12 @@ local Tabs = {}
 local Searchables = {}
 local Actions = {}
 local ActionOrder = {}
+local ActionStats = {
+    Total = 0,
+    Success = 0,
+    Failed = 0,
+    PerAction = {}
+}
 local CurrentPage = nil
 local SidebarCollapsed = Config.CompactSidebar == true
 local Minimized = false
@@ -1509,12 +1540,31 @@ local function createActionButton(parent, options)
 
             addRecent(id)
 
+            ActionStats.Total = ActionStats.Total + 1
+            ActionStats.PerAction[id] = ActionStats.PerAction[id] or {
+                total = 0,
+                success = 0,
+                failed = 0,
+                last = nil
+            }
+
+            local stat = ActionStats.PerAction[id]
+            stat.total = stat.total + 1
+            stat.last = timestamp()
+
             local ok, result = Guard:Run("Action:" .. id, callback)
 
             if not ok then
+                ActionStats.Failed = ActionStats.Failed + 1
+                stat.failed = stat.failed + 1
                 notify("Erro", "Falha em " .. text .. ". Veja Logs.", "danger", 4)
-            elseif type(result) == "string" and result ~= "" then
-                notify(text, result, "success", 3)
+            else
+                ActionStats.Success = ActionStats.Success + 1
+                stat.success = stat.success + 1
+
+                if type(result) == "string" and result ~= "" then
+                    notify(text, result, "success", 3)
+                end
             end
 
             button.Text = "   " .. text
@@ -2009,7 +2059,10 @@ local PageDefinitions = {
     { "Navigation", "Navigation", "Pontos e navegação autorizada." },
     { "Visual", "Visual", "Desempenho, gráficos e HUD." },
     { "Server", "Server", "Informações do servidor atual." },
+    { "Diagnostics", "Diagnostics", "Métricas, saúde do painel e relatório técnico." },
+    { "Profiles", "Profiles", "Presets e importação/exportação de configuração." },
     { "Logs", "Logs", "Eventos, avisos e erros do painel." },
+    { "Changelog", "Changelog", "Mudanças e evolução das versões." },
     { "Settings", "Settings", "Aparência, atalhos e manutenção." },
     { "About", "About", "Versão, build e capacidades." }
 }

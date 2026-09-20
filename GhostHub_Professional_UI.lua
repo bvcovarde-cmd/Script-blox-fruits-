@@ -836,6 +836,20 @@ local function notify(title, message, kind, duration)
     kind = kind or "info"
     duration = duration or 3
 
+    local visibleCards = {}
+    for _, child in ipairs(NotificationHost:GetChildren()) do
+        if child:IsA("Frame") then
+            table.insert(visibleCards, child)
+        end
+    end
+
+    while #visibleCards >= 6 do
+        local oldest = table.remove(visibleCards, 1)
+        if oldest and oldest.Parent then
+            oldest:Destroy()
+        end
+    end
+
     local colorKey = "accent"
 
     if kind == "success" then
@@ -2073,21 +2087,24 @@ for _, definition in ipairs(PageDefinitions) do
 end
 
 for name, button in pairs(Tabs) do
-    button.MouseButton1Click:Connect(function()
-        setPage(name)
+    local tabName = name
+    local tabButton = button
+
+    tabButton.MouseButton1Click:Connect(function()
+        setPage(tabName)
     end)
 
-    button.MouseEnter:Connect(function()
-        if not button:GetAttribute("Selected") then
-            tween(button, 0.1, {
+    tabButton.MouseEnter:Connect(function()
+        if not tabButton:GetAttribute("Selected") then
+            tween(tabButton, 0.1, {
                 BackgroundColor3 = Theme.panel3
             })
         end
     end)
 
-    button.MouseLeave:Connect(function()
-        if not button:GetAttribute("Selected") then
-            tween(button, 0.1, {
+    tabButton.MouseLeave:Connect(function()
+        if not tabButton:GetAttribute("Selected") then
+            tween(tabButton, 0.1, {
                 BackgroundColor3 = Theme.panel2
             })
         end
@@ -2324,11 +2341,12 @@ local function addModulePage(pageName, titleText, items)
     )
 
     for _, item in ipairs(items) do
-        local id = pageName .. "." .. string.gsub(string.lower(item), "%s+", "_")
+        local actionText = item
+        local id = pageName .. "." .. string.gsub(string.lower(actionText), "%s+", "_")
 
         createActionButton(section, {
             id = id,
-            text = item,
+            text = actionText,
             category = pageName,
             callback = function()
                 notify(
@@ -2726,12 +2744,14 @@ do
         "Visual",
         "Accessibility"
     }) do
+        local selectedProfile = profileName
+
         createActionButton(presets, {
-            id = "profile." .. string.lower(profileName),
-            text = "Aplicar " .. profileName,
+            id = "profile." .. string.lower(selectedProfile),
+            text = "Aplicar " .. selectedProfile,
             category = "Profiles",
             callback = function()
-                local ok, message = applyProfile(profileName)
+                local ok, message = applyProfile(selectedProfile)
 
                 if not ok then
                     error(message)
@@ -3360,6 +3380,82 @@ registerCommand("history", function()
 end)
 
 --==================================================
+-- INTERNAL API
+--==================================================
+
+local GhostHubAPI = {
+    Version = VERSION,
+    Build = BUILD
+}
+
+function GhostHubAPI.Notify(title, message, kind, duration)
+    notify(title, message, kind, duration)
+end
+
+function GhostHubAPI.Log(level, message)
+    pushLog(level, message)
+end
+
+function GhostHubAPI.StartTask(name, callback)
+    return TaskManager:Start(name, callback)
+end
+
+function GhostHubAPI.StopTask(name)
+    return TaskManager:Stop(name)
+end
+
+function GhostHubAPI.StopAll()
+    return TaskManager:StopAll()
+end
+
+function GhostHubAPI.RunCommand(command)
+    return runCommand(command)
+end
+
+function GhostHubAPI.SetPage(name)
+    return setPage(name)
+end
+
+function GhostHubAPI.GetConfig()
+    return deepCopy(Config)
+end
+
+function GhostHubAPI.SaveConfig()
+    return saveConfig()
+end
+
+function GhostHubAPI.GetDiagnosticReport()
+    return buildDiagnosticReport()
+end
+
+function GhostHubAPI.ApplyProfile(name)
+    return applyProfile(name)
+end
+
+function GhostHubAPI.RegisterCommand(name, callback)
+    if type(name) ~= "string" or typeof(callback) ~= "function" then
+        return false
+    end
+
+    registerCommand(name, callback)
+    return true
+end
+
+if Capabilities.getgenv then
+    local ok, env = pcall(getgenv)
+
+    if ok and type(env) == "table" then
+        env.GhostHubAPI = GhostHubAPI
+
+        GlobalMaid:Give(function()
+            if env.GhostHubAPI == GhostHubAPI then
+                env.GhostHubAPI = nil
+            end
+        end)
+    end
+end
+
+--==================================================
 -- SETTINGS
 --==================================================
 
@@ -3657,8 +3753,20 @@ do
         return Capabilities.writefile and "Disponível" or "Indisponível"
     end)
 
-    createInfo(version, "Clipboard", function()
+    createInfo(version, "Clipboard write", function()
         return Capabilities.setclipboard and "Disponível" or "Indisponível"
+    end)
+
+    createInfo(version, "Clipboard read", function()
+        return Capabilities.getclipboard and "Disponível" or "Indisponível"
+    end)
+
+    createInfo(version, "Internal API", function()
+        return Capabilities.getgenv and "Exposta em GhostHubAPI" or "Local"
+    end)
+
+    createInfo(version, "Active Profile", function()
+        return Config.ActiveProfile
     end)
 
     createInfo(version, "GUI parent", function()

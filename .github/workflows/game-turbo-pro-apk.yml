@@ -1,0 +1,63 @@
+name: Build Game Turbo Pro APK
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          SDKROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$(find "$SDKROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort | tail -n 1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager não encontrado em $SDKROOT"
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Unit tests
+        working-directory: game-turbo-pro/apk-project
+        run: gradle --no-daemon --stacktrace :app:testDebugUnitTest
+
+      - name: Android Lint
+        working-directory: game-turbo-pro/apk-project
+        run: gradle --no-daemon --stacktrace :app:lintDebug
+
+      - name: Build debug APK
+        working-directory: game-turbo-pro/apk-project
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact
+          cp game-turbo-pro/apk-project/app/build/outputs/apk/debug/app-debug.apk artifact/GameTurboPro-2026.09.200-debug.apk
+          sha256sum artifact/GameTurboPro-2026.09.200-debug.apk > artifact/GameTurboPro-2026.09.200-debug.apk.sha256
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameTurboPro-v2-200-APK
+          path: artifact/
+          if-no-files-found: error

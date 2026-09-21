@@ -449,7 +449,7 @@ public class MainActivity extends Activity {
     }
 
     private void confirmClearHistory(){new AlertDialog.Builder(this).setTitle("Limpar histórico?").setMessage("Perfis e jogos serão mantidos.").setPositiveButton("Limpar",(d,w)->{prefs.clearHistory();refreshAnalytics();renderGames();}).setNegativeButton("Cancelar",null).show();}
-    private void confirmClearAll(){new AlertDialog.Builder(this).setTitle("Apagar todos os dados locais?").setMessage("Isso remove histórico, favoritos, jogos manuais e perfis.").setPositiveButton("Apagar",(d,w)->{stopServices();prefs.clearAll();restore();loadGames();refreshAnalytics();}).setNegativeButton("Cancelar",null).show();}
+    private void confirmClearAll(){new AlertDialog.Builder(this).setTitle("Apagar todos os dados locais?").setMessage("Isso remove histórico, favoritos, jogos manuais e perfis.").setPositiveButton("Apagar",(d,w)->{stopServices();restore();prefs.clearAll();loadGames();refreshAnalytics();}).setNegativeButton("Cancelar",null).show();}
 
     private String sessionStatus(){return prefs.hasActiveSession()?"Sessão ativa • "+prefs.activePackage()+" • "+DeviceMonitor.duration(System.currentTimeMillis()-prefs.activeStart()):"Nenhuma sessão ativa";}
 

@@ -16,7 +16,7 @@ final class SessionRecord {
     String networkEnd = "";
     String profile = "Personalizado";
 
-    long duration() { return Math.max(0L, endedAt - startedAt); }
+    long duration() { return SessionMath.duration(startedAt, endedAt); }
 
     JSONObject json() throws JSONException {
         JSONObject o = new JSONObject();

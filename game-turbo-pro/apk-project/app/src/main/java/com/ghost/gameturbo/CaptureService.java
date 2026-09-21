@@ -42,7 +42,7 @@ public class CaptureService extends Service {
     private MediaRecorder recorder;
     private ParcelFileDescriptor videoPfd;
     private Uri videoUri;
-    private boolean recording;
+    private boolean recording, closing;
 
     @Override public void onCreate(){super.onCreate();channel();}
 
@@ -58,7 +58,7 @@ public class CaptureService extends Service {
         projection=m.getMediaProjection(code,data);
         if(projection==null){stopSelf();return START_NOT_STICKY;}
         projection.registerCallback(new MediaProjection.Callback(){
-            @Override public void onStop(){if(recording)finishRecording();else cleanup();}
+            @Override public void onStop(){if(closing)return;if(recording)finishRecording();else cleanup();}
         },new android.os.Handler(getMainLooper()));
         if(ACTION_RECORD.equals(i.getAction()))startRecording();else takeScreenshot();
         return START_NOT_STICKY;
@@ -124,7 +124,7 @@ public class CaptureService extends Service {
         try{if(recorder!=null)recorder.reset();}catch(Exception ignored){}
         try{if(recorder!=null)recorder.release();}catch(Exception ignored){}recorder=null;
         if(virtualDisplay!=null){try{virtualDisplay.release();}catch(Exception ignored){}virtualDisplay=null;}
-        if(projection!=null){try{projection.stop();}catch(Exception ignored){}projection=null;}
+        closing=true;if(projection!=null){try{projection.stop();}catch(Exception ignored){}projection=null;}
         try{if(videoPfd!=null)videoPfd.close();}catch(Exception ignored){}videoPfd=null;
         if(videoUri!=null){
             if(ok){ContentValues v=new ContentValues();v.put(MediaStore.Video.Media.IS_PENDING,0);try{getContentResolver().update(videoUri,v,null,null);}catch(Exception ignored){}}
@@ -134,7 +134,7 @@ public class CaptureService extends Service {
     }
 
     private void abortVideo(){recording=false;try{if(recorder!=null)recorder.release();}catch(Exception ignored){}recorder=null;if(videoUri!=null)try{getContentResolver().delete(videoUri,null,null);}catch(Exception ignored){}cleanup();}
-    private void cleanup(){if(virtualDisplay!=null)try{virtualDisplay.release();}catch(Exception ignored){}virtualDisplay=null;if(imageReader!=null)try{imageReader.close();}catch(Exception ignored){}imageReader=null;if(projection!=null)try{projection.stop();}catch(Exception ignored){}projection=null;stopSelf();}
+    private void cleanup(){if(closing)return;closing=true;if(virtualDisplay!=null)try{virtualDisplay.release();}catch(Exception ignored){}virtualDisplay=null;if(imageReader!=null)try{imageReader.close();}catch(Exception ignored){}imageReader=null;if(projection!=null)try{projection.stop();}catch(Exception ignored){}projection=null;stopSelf();}
     private void channel(){if(Build.VERSION.SDK_INT>=26){NotificationChannel c=new NotificationChannel("turbo_capture","Capturas Game Turbo",NotificationManager.IMPORTANCE_LOW);((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(c);}}
     private String stamp(){return new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(new Date());}
     @Override public IBinder onBind(Intent i){return null;}

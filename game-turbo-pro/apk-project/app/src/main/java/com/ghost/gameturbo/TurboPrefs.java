@@ -191,7 +191,7 @@ final class TurboPrefs {
         }catch(Exception ignored){}
         return count;
     }
-    private int clamp(int v){return Math.max(0,Math.min(100,v));}
+    private int clamp(int v){return SessionMath.clampPercent(v);}
 
     void clearRestoreKeys() {
         p.edit().remove("restore_volume").remove("restore_brightness")

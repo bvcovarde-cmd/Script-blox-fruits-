@@ -145,7 +145,7 @@ final class TurboPrefs {
     String exportSessionsJson() {
         JSONArray a = new JSONArray();
         for (SessionRecord r : sessions()) try { a.put(r.json()); } catch (Exception ignored) {}
-        return a.toString(2);
+        try { return a.toString(2); } catch (Exception e) { return a.toString(); }
     }
 
     String exportSessionsCsv() {

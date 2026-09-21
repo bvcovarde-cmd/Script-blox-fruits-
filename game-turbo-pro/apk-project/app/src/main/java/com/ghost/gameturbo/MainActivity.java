@@ -4,8 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.NotificationManager;
-import android.app.ShortcutInfo;
-import android.app.ShortcutManager;
+import android.content.pm.ShortcutInfo;
+import android.content.pm.ShortcutManager;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
@@ -90,7 +90,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle b){
         super.onCreate(b);
-        if(BuildConfig.DEBUG) StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder().detectAll().penaltyLog().build());
+        if((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE)!=0) StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder().detectAll().penaltyLog().build());
         prefs=new TurboPrefs(this);
         getWindow().setStatusBarColor(BG);getWindow().setNavigationBarColor(BG);
         shortcutPackage=getIntent().getStringExtra("launch_pkg");

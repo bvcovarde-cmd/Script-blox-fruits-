@@ -1,0 +1,27 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.ghost.gameturbo'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.ghost.gameturbo'
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName '2026.09'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

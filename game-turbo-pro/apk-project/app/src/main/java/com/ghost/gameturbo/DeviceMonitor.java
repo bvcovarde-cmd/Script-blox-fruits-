@@ -16,6 +16,8 @@ import android.os.Build;
 import android.os.PowerManager;
 import android.os.StatFs;
 import android.provider.Settings;
+import android.view.Display;
+import android.view.WindowManager;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -77,7 +79,12 @@ final class DeviceMonitor {
                 s.network=type+(s.networkValidated?" • internet OK":" • não validada")+(s.networkMetered?" • medida":"");
             }
         }catch(Exception ignored){}
-        s.refreshHz=c.getDisplay()==null?0f:c.getDisplay().getRefreshRate();
+        try {
+            Display display;
+            if (Build.VERSION.SDK_INT >= 30) display = c.getDisplay();
+            else display = ((WindowManager)c.getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay();
+            s.refreshHz = display == null ? 0f : display.getRefreshRate();
+        } catch (Exception ignored) { s.refreshHz = 0f; }
         return s;
     }
 

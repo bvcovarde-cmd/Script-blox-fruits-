@@ -1123,7 +1123,6 @@ end
 
 local function cityMap(name, theme)
     prepareMap(name, "Floresta")
-    CONFIG.UseTerrain = false
     createFlatBase(Color3.fromRGB(76, 128, 69), Enum.Material.Grass)
     createRoadGrid(theme)
 
@@ -1157,7 +1156,6 @@ end
 
 local function villageMap(name, medieval, farm)
     prepareMap(name, "Floresta")
-    CONFIG.UseTerrain = false
     createFlatBase(
         farm and Color3.fromRGB(111, 139, 70) or Color3.fromRGB(77, 136, 65),
         Enum.Material.Grass
@@ -1222,7 +1220,6 @@ local function volcanoMap()
             CFrame = CFrame.new(0, ring*7, 0),
             Color = Color3.fromRGB(60, 54, 52),
             Material = Enum.Material.Basalt,
-            Shape = Enum.PartType.Cylinder,
             Parent = parent
         })
     end
@@ -1233,7 +1230,6 @@ local function volcanoMap()
         CFrame = CFrame.new(0, 39, 0),
         Color = Color3.fromRGB(255, 88, 24),
         Material = Enum.Material.Neon,
-        Shape = Enum.PartType.Cylinder,
         Parent = parent
     })
 
@@ -1244,7 +1240,6 @@ end
 
 local function archipelagoMap()
     prepareMap("Arquipelago", "Tropical")
-    CONFIG.UseTerrain = false
     applyEnvironment("Dia")
 
     makePart("Ocean", {
@@ -1271,7 +1266,6 @@ local function archipelagoMap()
             CFrame = CFrame.new(c + Vector3.new(0,-1,0)),
             Color = Color3.fromRGB(224, 194, 127),
             Material = Enum.Material.Sand,
-            Shape = Enum.PartType.Cylinder,
             Parent = getSub("TerrainObjects")
         })
         palm(c + Vector3.new(rng:NextNumber(-12,12), 3, rng:NextNumber(-12,12)), 0.9)
@@ -1284,7 +1278,6 @@ end
 
 local function arenaMap()
     prepareMap("Arena", "Floresta")
-    CONFIG.UseTerrain = false
     createFlatBase(Color3.fromRGB(66, 68, 74), Enum.Material.Concrete)
 
     local arena = math.min(CONFIG.Size - 65, 215)
@@ -1330,7 +1323,6 @@ end
 
 local function obbyMap()
     prepareMap("Obby", "Floresta")
-    CONFIG.UseTerrain = false
     applyEnvironment("Dia")
 
     local parent = getSub("GameplayObjects")
@@ -1385,7 +1377,6 @@ end
 
 local function raceMap()
     prepareMap("Corrida", "Floresta")
-    CONFIG.UseTerrain = false
     createFlatBase(Color3.fromRGB(76,126,66), Enum.Material.Grass)
 
     local parent = getSub("Roads")
@@ -1429,7 +1420,6 @@ end
 
 local function mazeMap()
     prepareMap("Labirinto", "Floresta")
-    CONFIG.UseTerrain = false
     createFlatBase(Color3.fromRGB(70,119,61), Enum.Material.Grass)
     applyEnvironment("Nevoa")
 
@@ -1463,7 +1453,6 @@ end
 
 local function horrorMap()
     prepareMap("Horror", "Pantano")
-    CONFIG.UseTerrain = false
     createFlatBase(Color3.fromRGB(55,65,49), Enum.Material.Ground)
     applyEnvironment("Terror")
 
@@ -1489,7 +1478,6 @@ end
 
 local function completeProMap()
     prepareMap("Mapa Completo PRO", "Floresta")
-    CONFIG.UseTerrain = false
     createFlatBase(Color3.fromRGB(72,129,61), Enum.Material.Grass)
 
     road(Vector3.new(CONFIG.Size,0.55,18), CFrame.new(0,0.27,0))

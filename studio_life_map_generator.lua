@@ -1,5 +1,5 @@
 --[[
-    STUDIO LIFE MAP GENERATOR PRO V2
+    STUDIO LIFE MAP GENERATOR PRO V3
     Gerador procedural de mapas em Luau.
     Painel mobile/PC, presets, biomas, terrain opcional, natureza, cidades,
     iluminação, seed, progresso, pausa/cancelamento, undo/redo e validação.
@@ -22,7 +22,7 @@ end
 local Terrain = Workspace.Terrain
 
 local CONFIG = {
-    Version = "2.0.0",
+    Version = "3.0.0",
     FolderName = "StudioLife_MapGenerator_PRO",
     Seed = math.random(1, 999999),
     Size = 320,
@@ -39,7 +39,12 @@ local CONFIG = {
     MaxObjects = 900,
     ChunkStep = 24,
     Biome = "Floresta",
-    Theme = "Dia"
+    Theme = "Dia",
+    AutoSave = true,
+    AutoRecover = true,
+    CollisionCheck = true,
+    HistoryLimit = 6,
+    PersistenceFile = "StudioLife_MapGenerator_PRO_V3.json"
 }
 
 local QUALITY = {
@@ -144,10 +149,117 @@ local runtime = {
     progress = 0,
     occupancy = {},
     history = {},
-    redo = {}
+    redo = {},
+    logs = {},
+    recovery = nil,
+    baseTerrainBackup = nil,
+    selectedPreset = "Floresta",
+    previewPreset = "Floresta",
+    customPresets = {},
+    poiPositions = {},
+    lastDuration = 0,
+    generationStartedAt = 0
 }
 
 local UI = {}
+
+local function logEvent(level, message)
+    local stamp = os.date and os.date("%H:%M:%S") or "--:--:--"
+    local line = string.format("[%s] %s • %s", stamp, tostring(level or "INFO"), tostring(message or ""))
+    table.insert(runtime.logs, line)
+    while #runtime.logs > 80 do
+        table.remove(runtime.logs, 1)
+    end
+    if UI.logsBox then
+        UI.logsBox.Text = table.concat(runtime.logs, "\n")
+        UI.logsBox.CursorPosition = #UI.logsBox.Text + 1
+    end
+end
+
+local function serializableConfig()
+    local data = {}
+    for k, v in pairs(CONFIG) do
+        local t = type(v)
+        if t == "string" or t == "number" or t == "boolean" then
+            data[k] = v
+        end
+    end
+    return data
+end
+
+local function canUseFilesystem()
+    return type(writefile) == "function"
+        and type(readfile) == "function"
+        and type(isfile) == "function"
+end
+
+local function savePersistentState()
+    if not CONFIG.AutoSave or not canUseFilesystem() then
+        return false
+    end
+
+    local payload = {
+        version = CONFIG.Version,
+        config = serializableConfig(),
+        customPresets = runtime.customPresets
+    }
+
+    local ok, encoded = pcall(function()
+        return HttpService:JSONEncode(payload)
+    end)
+    if not ok then
+        logEvent("ERRO", "Falha ao codificar autosave")
+        return false
+    end
+
+    local wrote = pcall(function()
+        writefile(CONFIG.PersistenceFile, encoded)
+    end)
+
+    if wrote then
+        logEvent("SAVE", "Configurações salvas")
+    end
+    return wrote
+end
+
+local function loadPersistentState()
+    if not canUseFilesystem() then
+        return false
+    end
+
+    local exists = false
+    pcall(function()
+        exists = isfile(CONFIG.PersistenceFile)
+    end)
+    if not exists then
+        return false
+    end
+
+    local ok, decoded = pcall(function()
+        return HttpService:JSONDecode(readfile(CONFIG.PersistenceFile))
+    end)
+
+    if not ok or type(decoded) ~= "table" then
+        logEvent("ERRO", "Autosave inválido; usando padrão")
+        return false
+    end
+
+    local source = decoded.config or decoded
+    if type(source) == "table" then
+        for k, v in pairs(source) do
+            if CONFIG[k] ~= nil and type(v) == type(CONFIG[k]) then
+                CONFIG[k] = v
+            end
+        end
+    end
+
+    if type(decoded.customPresets) == "table" then
+        runtime.customPresets = decoded.customPresets
+    end
+
+    logEvent("LOAD", "Configurações restauradas")
+    return true
+end
 
 local function currentQuality()
     local q = QUALITY[CONFIG.Quality] or QUALITY.Mobile
@@ -286,6 +398,10 @@ local function makePart(kind, props)
     p.Parent = props.Parent or getSub("Decorations")
     safeTag(p, kind)
 
+    if CONFIG.Quality == "Mobile" and props.CastShadow == nil then
+        p.CastShadow = false
+    end
+
     runtime.objectCount += 1
     return p
 end
@@ -310,44 +426,150 @@ local function clearGeneratorEffects()
     end
 end
 
-local function terrainBounds()
-    local s = CONFIG.Size + 120
-    return CFrame.new(0, 40, 0), Vector3.new(s, 220, s)
+local TERRAIN_BACKUP_HALF = 360
+
+local function terrainCellRegion()
+    local minWorld = Vector3.new(-TERRAIN_BACKUP_HALF, -100, -TERRAIN_BACKUP_HALF)
+    local maxWorld = Vector3.new(TERRAIN_BACKUP_HALF, 220, TERRAIN_BACKUP_HALF)
+    local minCell = Terrain:WorldToCell(minWorld)
+    local maxCell = Terrain:WorldToCell(maxWorld)
+
+    local minV = Vector3int16.new(
+        math.floor(math.min(minCell.X, maxCell.X)),
+        math.floor(math.min(minCell.Y, maxCell.Y)),
+        math.floor(math.min(minCell.Z, maxCell.Z))
+    )
+    local maxV = Vector3int16.new(
+        math.ceil(math.max(minCell.X, maxCell.X)),
+        math.ceil(math.max(minCell.Y, maxCell.Y)),
+        math.ceil(math.max(minCell.Z, maxCell.Z))
+    )
+
+    return Region3int16.new(minV, maxV), minV
+end
+
+local function copyTerrainState()
+    local ok, state = pcall(function()
+        local region, corner = terrainCellRegion()
+        return {
+            data = Terrain:CopyRegion(region),
+            corner = corner
+        }
+    end)
+
+    if ok then
+        return state
+    end
+
+    logEvent("WARN", "Snapshot de Terrain indisponível")
+    return nil
+end
+
+local function restoreTerrainState(state)
+    if not state or not state.data or not state.corner then
+        return false
+    end
+
+    local ok = pcall(function()
+        Terrain:PasteRegion(state.data, state.corner, true)
+    end)
+
+    if not ok then
+        logEvent("WARN", "Não foi possível restaurar Terrain")
+    end
+    return ok
 end
 
 local function clearGeneratedTerrain()
     if not runtime.generatedTerrain then
         return
     end
-    local cf, size = terrainBounds()
-    pcall(function()
-        Terrain:FillBlock(cf, size, Enum.Material.Air)
-    end)
+
+    if runtime.baseTerrainBackup then
+        restoreTerrainState(runtime.baseTerrainBackup)
+    else
+        local region, _ = terrainCellRegion()
+        local min = Terrain:CellCornerToWorld(region.Min.X, region.Min.Y, region.Min.Z)
+        local max = Terrain:CellCornerToWorld(region.Max.X, region.Max.Y, region.Max.Z)
+        pcall(function()
+            Terrain:FillBlock(
+                CFrame.new((min + max) / 2),
+                Vector3.new(math.abs(max.X-min.X), math.abs(max.Y-min.Y), math.abs(max.Z-min.Z)),
+                Enum.Material.Air
+            )
+        end)
+    end
+
     runtime.generatedTerrain = false
 end
 
-local function saveSnapshot()
-    if runtime.generatedTerrain then
-        return
-    end
-
+local function cloneRoot()
     local root = Workspace:FindFirstChild(CONFIG.FolderName)
-    if not root then
-        return
-    end
-
-    local ok, clone = pcall(function()
-        return root:Clone()
-    end)
-
+    if not root then return nil end
+    local ok, clone = pcall(function() return root:Clone() end)
     if ok and clone then
         clone.Parent = nil
-        table.insert(runtime.history, clone)
-        while #runtime.history > 5 do
-            table.remove(runtime.history, 1)
-        end
-        table.clear(runtime.redo)
+        return clone
     end
+    return nil
+end
+
+local function captureState(forceTerrain)
+    return {
+        root = cloneRoot(),
+        terrain = (forceTerrain or runtime.generatedTerrain or CONFIG.UseTerrain) and copyTerrainState() or nil,
+        generatedTerrain = runtime.generatedTerrain,
+        objectCount = runtime.objectCount,
+        lastName = runtime.lastName
+    }
+end
+
+local function restoreState(state)
+    if not state then return false end
+
+    local current = Workspace:FindFirstChild(CONFIG.FolderName)
+    if current then current:Destroy() end
+
+    if state.root then
+        local rootClone = state.root:Clone()
+        rootClone.Parent = Workspace
+    end
+
+    if state.terrain then
+        restoreTerrainState(state.terrain)
+    end
+
+    runtime.generatedTerrain = state.generatedTerrain == true
+    runtime.objectCount = state.objectCount or 0
+    runtime.lastName = state.lastName or "Nenhum"
+    return true
+end
+
+local function saveSnapshot()
+    local root = Workspace:FindFirstChild(CONFIG.FolderName)
+    if not root and not runtime.generatedTerrain then
+        return
+    end
+
+    table.insert(runtime.history, captureState(false))
+    while #runtime.history > CONFIG.HistoryLimit do
+        table.remove(runtime.history, 1)
+    end
+    table.clear(runtime.redo)
+end
+
+local function captureRecovery()
+    runtime.recovery = captureState(CONFIG.UseTerrain or runtime.generatedTerrain)
+end
+
+local function restoreRecovery()
+    if runtime.recovery then
+        restoreState(runtime.recovery)
+        logEvent("RECOVERY", "Estado anterior restaurado")
+        runtime.recovery = nil
+        return true
+    end
+    return false
 end
 
 local function resetRuntimeForGeneration()
@@ -355,6 +577,7 @@ local function resetRuntimeForGeneration()
     runtime.paused = false
     runtime.objectCount = 0
     runtime.occupancy = {}
+    runtime.poiPositions = {}
     runtime.progress = 0
 end
 
@@ -372,61 +595,35 @@ local function clearMap(makeHistory)
 
     runtime.objectCount = 0
     runtime.occupancy = {}
+    runtime.poiPositions = {}
     runtime.lastName = "Nenhum"
+    logEvent("INFO", "Mapa gerado removido")
     setStatus("Mapa apagado", 0)
 end
 
 local function undo()
-    if runtime.generatedTerrain then
-        setStatus("Undo de Terrain não é seguro nesta sessão", runtime.progress)
-        return
-    end
-
     local prev = table.remove(runtime.history)
     if not prev then
         setStatus("Nada para desfazer", runtime.progress)
         return
     end
 
-    local current = Workspace:FindFirstChild(CONFIG.FolderName)
-    if current then
-        local ok, clone = pcall(function() return current:Clone() end)
-        if ok and clone then
-            clone.Parent = nil
-            table.insert(runtime.redo, clone)
-        end
-        current:Destroy()
-    end
-
-    prev.Parent = Workspace
-    runtime.objectCount = #prev:GetDescendants()
+    table.insert(runtime.redo, captureState(false))
+    restoreState(prev)
+    logEvent("UNDO", "Estado restaurado")
     setStatus("Undo concluído", 1)
 end
 
 local function redo()
-    if runtime.generatedTerrain then
-        setStatus("Redo de Terrain não é seguro nesta sessão", runtime.progress)
-        return
-    end
-
     local nextMap = table.remove(runtime.redo)
     if not nextMap then
         setStatus("Nada para refazer", runtime.progress)
         return
     end
 
-    local current = Workspace:FindFirstChild(CONFIG.FolderName)
-    if current then
-        local ok, clone = pcall(function() return current:Clone() end)
-        if ok and clone then
-            clone.Parent = nil
-            table.insert(runtime.history, clone)
-        end
-        current:Destroy()
-    end
-
-    nextMap.Parent = Workspace
-    runtime.objectCount = #nextMap:GetDescendants()
+    table.insert(runtime.history, captureState(false))
+    restoreState(nextMap)
+    logEvent("REDO", "Estado restaurado")
     setStatus("Redo concluído", 1)
 end
 
@@ -495,25 +692,33 @@ local function generateTerrain(islandMode, mountainBoost)
         return true
     end
 
+    if not runtime.baseTerrainBackup then
+        runtime.baseTerrainBackup = copyTerrainState()
+    end
+
     runtime.generatedTerrain = true
     local q = currentQuality()
     local step = q.terrainStep
     local half = math.floor(CONFIG.Size / 2)
-    local total = 0
-    for _ = -half, half, step do
-        for __ = -half, half, step do
-            total += 1
+    local cells = {}
+
+    for x = -half, half, step do
+        for z = -half, half, step do
+            table.insert(cells, {x = x, z = z, d = x*x + z*z})
         end
     end
 
-    local i = 0
-    for x = -half, half, step do
-        for z = -half, half, step do
-            i += 1
-            if not checkpoint(i, total, "Gerando Terrain...") then
+    table.sort(cells, function(a, b)
+        return a.d < b.d
+    end)
+
+    local total = #cells
+    for i, node in ipairs(cells) do
+            if not checkpoint(i, total, "Gerando Terrain por chunks...") then
                 return false
             end
 
+            local x, z = node.x, node.z
             local h = groundHeight(x, z, islandMode)
             if mountainBoost then
                 h *= mountainBoost
@@ -532,7 +737,6 @@ local function generateTerrain(islandMode, mountainBoost)
                     material
                 )
             end)
-        end
     end
 
     if CONFIG.Water and islandMode then
@@ -982,6 +1186,7 @@ local function createPOIs(count)
                 Parent = parent
             })
             if base then
+                table.insert(runtime.poiPositions, Vector3.new(x, 0, z))
                 makePart("POI", {
                     Name = "POIMarker",
                     Size = Vector3.new(1.2, 8, 1.2),
@@ -992,6 +1197,29 @@ local function createPOIs(count)
                     Parent = parent
                 })
             end
+        end
+    end
+end
+
+local function connectPOIs()
+    if #runtime.poiPositions < 2 then return end
+    local parent = getSub("Roads")
+
+    for i = 2, #runtime.poiPositions do
+        local a = runtime.poiPositions[i - 1]
+        local b = runtime.poiPositions[i]
+        local mid = (a + b) / 2
+        local distance = (b - a).Magnitude
+
+        if distance > 1 then
+            makePart("Path", {
+                Name = "POI_Path_" .. i,
+                Size = Vector3.new(7, 0.35, distance),
+                CFrame = CFrame.lookAt(mid + Vector3.new(0,0.18,0), b + Vector3.new(0,0.18,0)),
+                Color = Color3.fromRGB(105, 91, 72),
+                Material = Enum.Material.Ground,
+                Parent = parent
+            })
         end
     end
 end
@@ -1094,14 +1322,22 @@ local function finishMap(name)
     runtime.progress = 1
     runtime.busy = false
     runtime.cancel = false
+    runtime.lastDuration = math.max(0, os.clock() - (runtime.generationStartedAt or os.clock()))
+    runtime.recovery = nil
+    savePersistentState()
+    logEvent("OK", string.format("%s concluído em %.2fs com %d objetos", name, runtime.lastDuration, runtime.objectCount))
     setStatus("✓ " .. name .. " concluído", 1)
 end
 
 local function failMap(name, err)
     runtime.busy = false
     runtime.cancel = false
+    if CONFIG.AutoRecover then
+        restoreRecovery()
+    end
     warn("[MapGen] " .. tostring(err))
-    setStatus("Erro em " .. name .. ": " .. tostring(err), runtime.progress)
+    logEvent("ERRO", name .. " • " .. tostring(err))
+    setStatus("Erro em " .. name .. ": recuperação aplicada", runtime.progress)
 end
 
 local function naturalMap(name, biomeName, natureCount, islandMode, mountainBoost)
@@ -1118,6 +1354,7 @@ local function naturalMap(name, biomeName, natureCount, islandMode, mountainBoos
 
     createSpawn(Vector3.new(0, 2, 0))
     createPOIs(math.clamp(math.floor(CONFIG.Size / 90), 2, 6))
+    connectPOIs()
     finishMap(name)
 end
 
@@ -1497,6 +1734,7 @@ local function completeProMap()
 
     placeNature(35)
     createPOIs(5)
+    connectPOIs()
     createSpawn(Vector3.new(9,1,9))
 
     makePart("Landmark", {
@@ -1551,18 +1789,28 @@ local function runGenerator(name)
         return
     end
 
+    captureRecovery()
     runtime.busy = true
     runtime.cancel = false
     runtime.paused = false
     runtime.lastGenerator = name
+    runtime.selectedPreset = name
+    runtime.generationStartedAt = os.clock()
+    logEvent("START", "Gerando " .. name)
 
     task.spawn(function()
-        local ok, err = pcall(fn)
+        local ok, err = xpcall(fn, function(e)
+            return tostring(e)
+        end)
         if not ok then
             failMap(name, err)
         elseif runtime.cancel then
             runtime.busy = false
-            setStatus("Geração cancelada", runtime.progress)
+            if CONFIG.AutoRecover then
+                restoreRecovery()
+            end
+            logEvent("CANCEL", name)
+            setStatus("Geração cancelada • estado anterior restaurado", runtime.progress)
         elseif runtime.busy then
             finishMap(name)
         end
@@ -1584,37 +1832,68 @@ local function validateMap()
         return
     end
 
-    local parts = 0
+    local parts = {}
     local anchored = 0
     local invalid = 0
-    local folders = {}
+    local possibleOverlaps = 0
 
     for _, inst in ipairs(root:GetDescendants()) do
         if inst:IsA("BasePart") then
-            parts += 1
+            table.insert(parts, inst)
             if inst.Anchored then anchored += 1 end
-            if inst.Size.X <= 0 or inst.Size.Y <= 0 or inst.Size.Z <= 0 then
+            if inst.Size.X <= 0 or inst.Size.Y <= 0 or inst.Size.Z <= 0
+                or inst.Position.X ~= inst.Position.X
+                or inst.Position.Y ~= inst.Position.Y
+                or inst.Position.Z ~= inst.Position.Z then
                 invalid += 1
             end
-        elseif inst:IsA("Folder") then
-            folders[inst.Name] = #inst:GetChildren()
         end
     end
 
+    if CONFIG.CollisionCheck and #parts > 1 then
+        local params = OverlapParams.new()
+        params.FilterType = Enum.RaycastFilterType.Include
+        params.FilterDescendantsInstances = {root}
+        params.MaxParts = 8
+
+        local sampleCount = math.min(#parts, 180)
+        for i = 1, sampleCount do
+            local p = parts[i]
+            if p.CanCollide and p.Transparency < 0.95 then
+                local ok, hits = pcall(function()
+                    return Workspace:GetPartBoundsInBox(
+                        p.CFrame,
+                        Vector3.new(
+                            math.max(0.1, p.Size.X - 0.12),
+                            math.max(0.1, p.Size.Y - 0.12),
+                            math.max(0.1, p.Size.Z - 0.12)
+                        ),
+                        params
+                    )
+                end)
+                if ok and #hits > 1 then
+                    possibleOverlaps += 1
+                end
+            end
+            if i % 30 == 0 then task.wait() end
+        end
+    end
+
+    local streaming = "?"
+    pcall(function()
+        streaming = Workspace.StreamingEnabled and "ON" or "OFF"
+    end)
+
     local report = string.format(
-        "Validação ✓ Partes:%d • Anchored:%d • Inválidas:%d",
-        parts, anchored, invalid
+        "Validação ✓ Partes:%d • Anchored:%d • Inválidas:%d • Sobreposições possíveis:%d • Streaming:%s",
+        #parts, anchored, invalid, possibleOverlaps, streaming
     )
+    logEvent("VALIDATE", report)
     setStatus(report, 1)
 end
 
 local function exportConfig()
-    local data = {}
-    for k,v in pairs(CONFIG) do
-        if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
-            data[k] = v
-        end
-    end
+    local data = serializableConfig()
 
     local ok, json = pcall(function()
         return HttpService:JSONEncode(data)
@@ -1663,8 +1942,145 @@ local function importConfig()
 
     currentQuality()
     resetRng()
+    savePersistentState()
+    logEvent("IMPORT", "Configuração importada")
     setStatus("Configuração importada", runtime.progress)
 end
+
+local function saveCustomPreset(name)
+    name = tostring(name or ""):gsub("^%s+",""):gsub("%s+$","")
+    if name == "" then
+        setStatus("Digite um nome para o preset", runtime.progress)
+        return
+    end
+    runtime.customPresets[name] = serializableConfig()
+    savePersistentState()
+    logEvent("PRESET", "Salvo: " .. name)
+    setStatus("Preset salvo: " .. name, runtime.progress)
+end
+
+local function applyCustomPreset(name)
+    local data = runtime.customPresets[name]
+    if type(data) ~= "table" then
+        setStatus("Preset não encontrado: " .. tostring(name), runtime.progress)
+        return
+    end
+
+    for k,v in pairs(data) do
+        if CONFIG[k] ~= nil and type(v) == type(CONFIG[k]) then
+            CONFIG[k] = v
+        end
+    end
+    currentQuality()
+    resetRng()
+    logEvent("PRESET", "Carregado: " .. name)
+    setStatus("Preset carregado: " .. name, runtime.progress)
+end
+
+local function autoTuneQuality()
+    local camera = Workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize or Vector2.new(1280,720)
+    local touchOnly = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+    if touchOnly or viewport.X < 650 then
+        CONFIG.Quality = "Mobile"
+    elseif viewport.X < 1100 then
+        CONFIG.Quality = "Normal"
+    else
+        CONFIG.Quality = "Alto"
+    end
+
+    currentQuality()
+    savePersistentState()
+    logEvent("AUTO", "Qualidade automática: " .. CONFIG.Quality)
+    setStatus("Qualidade automática: " .. CONFIG.Quality, runtime.progress)
+end
+
+local function buildPreview(name)
+    local viewport = UI.previewViewport
+    if not viewport then return end
+
+    viewport:ClearAllChildren()
+
+    local world = Instance.new("WorldModel")
+    world.Parent = viewport
+
+    local camera = Instance.new("Camera")
+    camera.CFrame = CFrame.new(35, 30, 42) * CFrame.Angles(math.rad(-18), math.rad(38), 0)
+    camera.Focus = CFrame.new(0,0,0)
+    camera.Parent = viewport
+    viewport.CurrentCamera = camera
+
+    local function previewPart(size, cf, color, material)
+        local p = Instance.new("Part")
+        p.Anchored = true
+        p.Size = size
+        p.CFrame = cf
+        p.Color = color
+        p.Material = material or Enum.Material.SmoothPlastic
+        p.Parent = world
+        return p
+    end
+
+    local bName = ({
+        Tropical="Tropical", Taiga="Taiga", Neve="Neve", Deserto="Deserto",
+        Savana="Savana", Pantano="Pantano", Vulcao="Vulcanico",
+        Cristais="Cristal", Alien="Alien"
+    })[name] or "Floresta"
+    local b = BIOMES[bName] or BIOMES.Floresta
+
+    previewPart(Vector3.new(48,2,48), CFrame.new(0,-1,0), b.ground, b.material)
+
+    local localRng = Random.new(CONFIG.Seed + #name * 31)
+
+    if name == "Cidade" or name == "Cyberpunk" then
+        previewPart(Vector3.new(8,0.4,48), CFrame.new(0,0.2,0), Color3.fromRGB(45,45,50), Enum.Material.Asphalt)
+        previewPart(Vector3.new(48,0.4,8), CFrame.new(0,0.22,0), Color3.fromRGB(45,45,50), Enum.Material.Asphalt)
+        for i = 1, 10 do
+            local x = (i % 2 == 0) and localRng:NextNumber(8,20) or localRng:NextNumber(-20,-8)
+            local z = localRng:NextNumber(-20,20)
+            local h = localRng:NextNumber(5,18)
+            previewPart(
+                Vector3.new(6,h,6),
+                CFrame.new(x,h/2,z),
+                name == "Cyberpunk" and Color3.fromRGB(52,58,86) or Color3.fromRGB(135,145,155),
+                Enum.Material.Concrete
+            )
+        end
+    elseif name == "Obby" then
+        local pos = Vector3.new(-18,2,-18)
+        for i = 1, 14 do
+            pos += Vector3.new(localRng:NextNumber(-2,4), 1.7, 3)
+            previewPart(Vector3.new(5,1,5), CFrame.new(pos), Color3.fromHSV(i/14,0.7,1))
+        end
+    elseif name == "Arena" then
+        previewPart(Vector3.new(40,8,2), CFrame.new(0,4,-20), Color3.fromRGB(70,72,80), Enum.Material.Metal)
+        previewPart(Vector3.new(40,8,2), CFrame.new(0,4,20), Color3.fromRGB(70,72,80), Enum.Material.Metal)
+        previewPart(Vector3.new(2,8,40), CFrame.new(-20,4,0), Color3.fromRGB(70,72,80), Enum.Material.Metal)
+        previewPart(Vector3.new(2,8,40), CFrame.new(20,4,0), Color3.fromRGB(70,72,80), Enum.Material.Metal)
+    else
+        for i = 1, 22 do
+            local x = localRng:NextNumber(-20,20)
+            local z = localRng:NextNumber(-20,20)
+            local h = localRng:NextNumber(2,8)
+            local color = b.tree == "Crystal"
+                and Color3.fromRGB(120,140,255)
+                or b.tree == "Cactus"
+                    and Color3.fromRGB(50,135,70)
+                    or Color3.fromRGB(55,135,65)
+            previewPart(Vector3.new(1.3,h,1.3), CFrame.new(x,h/2,z), color, b.tree=="Crystal" and Enum.Material.Neon or Enum.Material.SmoothPlastic)
+        end
+    end
+
+    runtime.previewPreset = name
+    if UI.previewTitle then
+        UI.previewTitle.Text = "Prévia: " .. name
+    end
+    logEvent("PREVIEW", name)
+    setStatus("Prévia atualizada: " .. name, runtime.progress)
+end
+
+loadPersistentState()
 
 -- =========================
 -- GUI
@@ -1728,7 +2144,7 @@ local title = Instance.new("TextLabel")
 title.Position = UDim2.fromOffset(15,7)
 title.Size = UDim2.new(1,-100,0,27)
 title.BackgroundTransparency = 1
-title.Text = "MAP GENERATOR PRO V2"
+title.Text = "MAP GENERATOR PRO V3"
 title.TextColor3 = COLORS.text
 title.Font = Enum.Font.GothamBold
 title.TextSize = 17
@@ -1965,7 +2381,9 @@ local terrainTab = addTab("Terreno")
 local natureTab = addTab("Natureza")
 local cityTab = addTab("Cidade")
 local envTab = addTab("Ambiente")
+local previewTab = addTab("Prévia")
 local systemTab = addTab("Sistema")
+local logsTab = addTab("Logs")
 
 section(mapsTab, "GERADORES")
 addButton(mapsTab, "⚡ GERAR MAPA COMPLETO PRO", function()
@@ -1989,7 +2407,7 @@ section(terrainTab, "TERRAIN E RELEVO")
 local terrainToggle
 terrainToggle = addButton(terrainTab, "Terrain real: DESLIGADO", function()
     CONFIG.UseTerrain = not CONFIG.UseTerrain
-    terrainToggle.Text = "Terrain real: " .. (CONFIG.UseTerrain and "LIGADO" or "DESLIGADO")
+    terrainToggle.Text = "Terrain real: " .. (CONFIG.UseTerrain and "LIGADO" or "DESLIGADO")\n    savePersistentState()
     setStatus("Terrain real " .. (CONFIG.UseTerrain and "ativado" or "desativado"), runtime.progress)
 end)
 
@@ -1999,7 +2417,7 @@ sizeBtn = addButton(terrainTab, "Tamanho: " .. CONFIG.Size, function()
     local idx = table.find(values, CONFIG.Size) or 2
     idx = idx % #values + 1
     CONFIG.Size = values[idx]
-    sizeBtn.Text = "Tamanho: " .. CONFIG.Size
+    sizeBtn.Text = "Tamanho: " .. CONFIG.Size\n    savePersistentState()
 end)
 
 local heightBtn
@@ -2008,13 +2426,13 @@ heightBtn = addButton(terrainTab, "Relevo: " .. CONFIG.HeightAmplitude, function
     local idx = table.find(values, CONFIG.HeightAmplitude) or 3
     idx = idx % #values + 1
     CONFIG.HeightAmplitude = values[idx]
-    heightBtn.Text = "Relevo: " .. CONFIG.HeightAmplitude
+    heightBtn.Text = "Relevo: " .. CONFIG.HeightAmplitude\n    savePersistentState()
 end)
 
 local waterBtn
 waterBtn = addButton(terrainTab, "Água: LIGADA", function()
     CONFIG.Water = not CONFIG.Water
-    waterBtn.Text = "Água: " .. (CONFIG.Water and "LIGADA" or "DESLIGADA")
+    waterBtn.Text = "Água: " .. (CONFIG.Water and "LIGADA" or "DESLIGADA")\n    savePersistentState()
 end)
 
 addInfo(terrainTab, "Terrain real é opcional. O padrão usa peças para evitar mexer no Terrain existente do mapa.")
@@ -2108,6 +2526,54 @@ for _, env in ipairs({"Dia","Noite","PorDoSol","Nevoa","Terror","Cyberpunk","Fan
     end)
 end
 
+section(previewTab, "PRÉ-VISUALIZAÇÃO")
+
+local previewTitle = Instance.new("TextLabel")
+previewTitle.Size = UDim2.new(1,-4,0,30)
+previewTitle.BackgroundColor3 = COLORS.panel
+previewTitle.BorderSizePixel = 0
+previewTitle.Text = "Prévia: " .. runtime.previewPreset
+previewTitle.TextColor3 = COLORS.text
+previewTitle.Font = Enum.Font.GothamSemibold
+previewTitle.TextSize = 12
+previewTitle.Parent = previewTab
+UI.previewTitle = previewTitle
+
+local previewTitleCorner = Instance.new("UICorner")
+previewTitleCorner.CornerRadius = UDim.new(0,9)
+previewTitleCorner.Parent = previewTitle
+
+local previewViewport = Instance.new("ViewportFrame")
+previewViewport.Size = UDim2.new(1,-4,0,220)
+previewViewport.BackgroundColor3 = Color3.fromRGB(20,24,33)
+previewViewport.BorderSizePixel = 0
+previewViewport.Ambient = Color3.fromRGB(180,180,180)
+previewViewport.LightColor = Color3.fromRGB(255,255,255)
+previewViewport.LightDirection = Vector3.new(-1,-1,-1)
+previewViewport.Parent = previewTab
+UI.previewViewport = previewViewport
+
+local previewCorner = Instance.new("UICorner")
+previewCorner.CornerRadius = UDim.new(0,12)
+previewCorner.Parent = previewViewport
+
+local previewCycle
+previewCycle = addButton(previewTab, "Preset: " .. runtime.previewPreset, function()
+    local idx = table.find(PRESETS, runtime.previewPreset) or 1
+    idx = idx % #PRESETS + 1
+    runtime.previewPreset = PRESETS[idx]
+    previewCycle.Text = "Preset: " .. runtime.previewPreset
+    buildPreview(runtime.previewPreset)
+end)
+
+addButton(previewTab, "👁 Atualizar prévia", function()
+    buildPreview(runtime.previewPreset)
+end, COLORS.accent)
+
+addButton(previewTab, "▶ Gerar este preset", function()
+    runGenerator(runtime.previewPreset)
+end, COLORS.green)
+
 section(systemTab, "DESEMPENHO")
 local qualityBtn
 qualityBtn = addButton(systemTab, "Qualidade: " .. CONFIG.Quality, function()
@@ -2119,6 +2585,11 @@ qualityBtn = addButton(systemTab, "Qualidade: " .. CONFIG.Quality, function()
     qualityBtn.Text = "Qualidade: " .. CONFIG.Quality
     setStatus("Qualidade alterada para " .. CONFIG.Quality, runtime.progress)
 end)
+
+addButton(systemTab, "⚙ Qualidade automática", function()
+    autoTuneQuality()
+    qualityBtn.Text = "Qualidade: " .. CONFIG.Quality
+end, COLORS.green)
 
 local seedBtn
 seedBtn = addButton(systemTab, "Nova seed", function()
@@ -2134,6 +2605,20 @@ addButton(systemTab, "Copiar seed", function()
     else
         setStatus("Seed atual: " .. CONFIG.Seed, runtime.progress)
     end
+end)
+
+local autosaveBtn
+autosaveBtn = addButton(systemTab, "Autosave: " .. (CONFIG.AutoSave and "LIGADO" or "DESLIGADO"), function()
+    CONFIG.AutoSave = not CONFIG.AutoSave
+    autosaveBtn.Text = "Autosave: " .. (CONFIG.AutoSave and "LIGADO" or "DESLIGADO")
+    if CONFIG.AutoSave then savePersistentState() end
+end)
+
+local recoverBtn
+recoverBtn = addButton(systemTab, "Auto-recovery: " .. (CONFIG.AutoRecover and "LIGADO" or "DESLIGADO"), function()
+    CONFIG.AutoRecover = not CONFIG.AutoRecover
+    recoverBtn.Text = "Auto-recovery: " .. (CONFIG.AutoRecover and "LIGADO" or "DESLIGADO")
+    savePersistentState()
 end)
 
 section(systemTab, "CONTROLE DA GERAÇÃO")
@@ -2160,6 +2645,42 @@ addButton(systemTab, "↷ Redo", redo)
 addButton(systemTab, "✓ Validar mapa", validateMap, COLORS.green)
 addButton(systemTab, "🗑 Apagar mapa gerado", function() clearMap(true) end, COLORS.red)
 
+section(systemTab, "PRESETS PERSONALIZADOS")
+
+local presetNameBox = Instance.new("TextBox")
+presetNameBox.Size = UDim2.new(1,-4,0,40)
+presetNameBox.BackgroundColor3 = COLORS.panel
+presetNameBox.BorderSizePixel = 0
+presetNameBox.Text = ""
+presetNameBox.PlaceholderText = "Nome do preset"
+presetNameBox.PlaceholderColor3 = COLORS.muted
+presetNameBox.TextColor3 = COLORS.text
+presetNameBox.TextSize = 11
+presetNameBox.Font = Enum.Font.Gotham
+presetNameBox.ClearTextOnFocus = false
+presetNameBox.Parent = systemTab
+
+local presetCorner = Instance.new("UICorner")
+presetCorner.CornerRadius = UDim.new(0,9)
+presetCorner.Parent = presetNameBox
+
+addButton(systemTab, "Salvar preset atual", function()
+    saveCustomPreset(presetNameBox.Text)
+end)
+
+addButton(systemTab, "Carregar preset", function()
+    applyCustomPreset(presetNameBox.Text)
+    qualityBtn.Text = "Qualidade: " .. CONFIG.Quality
+end)
+
+addButton(systemTab, "Salvar configurações agora", function()
+    if savePersistentState() then
+        setStatus("Configurações salvas", runtime.progress)
+    else
+        setStatus("Filesystem não disponível; use Exportar", runtime.progress)
+    end
+end, COLORS.green)
+
 section(systemTab, "IMPORTAR / EXPORTAR CONFIG")
 local configBox = Instance.new("TextBox")
 configBox.Size = UDim2.new(1,-4,0,80)
@@ -2183,6 +2704,35 @@ configCorner.Parent = configBox
 
 addButton(systemTab, "Exportar configuração", exportConfig)
 addButton(systemTab, "Importar configuração", importConfig)
+
+section(logsTab, "LOG DE EXECUÇÃO")
+
+local logsBox = Instance.new("TextBox")
+logsBox.Size = UDim2.new(1,-4,0,285)
+logsBox.BackgroundColor3 = COLORS.panel
+logsBox.BorderSizePixel = 0
+logsBox.Text = table.concat(runtime.logs, "\n")
+logsBox.TextColor3 = COLORS.muted
+logsBox.TextSize = 9
+logsBox.Font = Enum.Font.Code
+logsBox.TextWrapped = false
+logsBox.ClearTextOnFocus = false
+logsBox.MultiLine = true
+logsBox.TextEditable = false
+logsBox.TextXAlignment = Enum.TextXAlignment.Left
+logsBox.TextYAlignment = Enum.TextYAlignment.Top
+logsBox.Parent = logsTab
+UI.logsBox = logsBox
+
+local logsCorner = Instance.new("UICorner")
+logsCorner.CornerRadius = UDim.new(0,9)
+logsCorner.Parent = logsBox
+
+addButton(logsTab, "Limpar logs", function()
+    table.clear(runtime.logs)
+    logsBox.Text = ""
+    setStatus("Logs limpos", runtime.progress)
+end, COLORS.red)
 
 local minimized = false
 minimize.MouseButton1Click:Connect(function()
@@ -2254,7 +2804,9 @@ end
 
 showTab("Mapas")
 currentQuality()
-setStatus("Pronto • escolha um preset", 0)
+buildPreview(runtime.previewPreset)
+logEvent("BOOT", "Map Generator PRO V3 carregado")
+setStatus("Pronto • PRO V3", 0)
 
 _G.StudioLifeMapGeneratorPRO = {
     Config = CONFIG,
@@ -2264,7 +2816,15 @@ _G.StudioLifeMapGeneratorPRO = {
     Undo = undo,
     Redo = redo,
     ExportConfig = exportConfig,
+    ImportConfig = importConfig,
+    Save = savePersistentState,
+    Load = loadPersistentState,
+    SavePreset = saveCustomPreset,
+    LoadPreset = applyCustomPreset,
+    Preview = buildPreview,
+    AutoTune = autoTuneQuality,
+    Logs = runtime.logs,
     Version = CONFIG.Version
 }
 
-print("[MapGen] Studio Life Map Generator PRO V2 carregado.")
+print("[MapGen] Studio Life Map Generator PRO V3 carregado.")

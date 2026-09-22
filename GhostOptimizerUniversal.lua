@@ -31,7 +31,7 @@ pcall(function()
     end
 end)
 
-local VERSION = "2026.09"
+local VERSION = "2026.09.2"
 local CONFIG_FILE = "GhostOptimizerUniversal.json"
 
 local state = {
@@ -41,8 +41,19 @@ local state = {
     fpsCap = 60,
     minimized = false,
     running = true,
+    benchmarkRunning = false,
     lastStageChange = 0,
 }
+
+local currentFps = 60
+local smoothFps = 60
+local fpsHistory = {}
+local fpsMin = 999
+local fpsMax = 0
+local fpsSum = 0
+local fpsCount = 0
+local dropCount = 0
+local modifiedProperties = 0
 
 local original = setmetatable({}, {__mode = "k"})
 local connections = {}
@@ -58,6 +69,37 @@ local function connect(signal, fn)
     return c
 end
 
+local function isProtectedObject(obj)
+    if not obj then
+        return true
+    end
+
+    local character = player.Character
+    if character and (obj == character or obj:IsDescendantOf(character)) then
+        return true
+    end
+
+    local camera = workspace.CurrentCamera
+    if camera and (obj == camera or obj:IsDescendantOf(camera)) then
+        return true
+    end
+
+    return false
+end
+
+local function rollingAverage(limit)
+    local count = math.min(limit or 10, #fpsHistory)
+    if count <= 0 then
+        return currentFps
+    end
+
+    local total = 0
+    for i = #fpsHistory - count + 1, #fpsHistory do
+        total = total + fpsHistory[i]
+    end
+    return total / count
+end
+
 local function remember(obj, prop)
     if not obj then
         return
@@ -70,9 +112,12 @@ local function remember(obj, prop)
     end
 
     if bucket[prop] == nil then
-        pcall(function()
+        local ok = pcall(function()
             bucket[prop] = obj[prop]
         end)
+        if ok then
+            modifiedProperties = modifiedProperties + 1
+        end
     end
 end
 
@@ -88,17 +133,24 @@ local function setProp(obj, prop, value)
 end
 
 local function restoreAll()
+    local restored = 0
     for obj, props in pairs(original) do
         if obj then
             for prop, value in pairs(props) do
                 pcall(function()
                     obj[prop] = value
                 end)
+                restored = restored + 1
+
+                if restored % 450 == 0 then
+                    task.wait()
+                end
             end
         end
     end
 
     original = setmetatable({}, {__mode = "k"})
+    modifiedProperties = 0
 
     if originalQuality ~= nil then
         pcall(function()
@@ -125,7 +177,7 @@ local function isParticle(obj)
 end
 
 local function optimizeObject(obj, stage)
-    if not obj then
+    if not obj or isProtectedObject(obj) then
         return
     end
 
@@ -216,11 +268,19 @@ local function scanWorld(stage)
     applyQuality(stage)
 
     local descendants = workspace:GetDescendants()
+    local batchSize = 450
+
+    if #descendants > 30000 then
+        batchSize = 220
+    elseif #descendants > 15000 then
+        batchSize = 300
+    end
+
     for i = 1, #descendants do
         optimizeObject(descendants[i], stage)
 
-        -- Evita um pico grande ao processar mapas gigantes.
-        if i % 700 == 0 then
+        -- Anti-stutter: mapas grandes sao processados aos poucos.
+        if i % batchSize == 0 then
             task.wait()
         end
     end
@@ -229,6 +289,90 @@ local function scanWorld(stage)
     for i = 1, #lightingChildren do
         optimizeObject(lightingChildren[i], stage)
     end
+end
+
+local function analyzeMap(showStatus)
+    local result = {
+        total = 0,
+        parts = 0,
+        meshes = 0,
+        textures = 0,
+        particles = 0,
+        lights = 0,
+        effects = 0,
+        recommended = 0,
+        score = 0,
+    }
+
+    local descendants = workspace:GetDescendants()
+    result.total = #descendants
+
+    for i = 1, #descendants do
+        local obj = descendants[i]
+
+        if obj:IsA("BasePart") then
+            result.parts = result.parts + 1
+            if obj:IsA("MeshPart") then
+                result.meshes = result.meshes + 1
+            end
+        elseif obj:IsA("Decal") or obj:IsA("Texture") then
+            result.textures = result.textures + 1
+        elseif isParticle(obj) then
+            result.particles = result.particles + 1
+        elseif obj:IsA("PointLight") or obj:IsA("SpotLight") or obj:IsA("SurfaceLight") then
+            result.lights = result.lights + 1
+        end
+
+        if i % 1200 == 0 then
+            task.wait()
+        end
+    end
+
+    for _, obj in ipairs(Lighting:GetChildren()) do
+        if isEffect(obj) then
+            result.effects = result.effects + 1
+        end
+    end
+
+    if result.parts > 20000 then
+        result.score = result.score + 3
+    elseif result.parts > 9000 then
+        result.score = result.score + 2
+    elseif result.parts > 4000 then
+        result.score = result.score + 1
+    end
+
+    if result.meshes > 5000 then
+        result.score = result.score + 2
+    elseif result.meshes > 1800 then
+        result.score = result.score + 1
+    end
+
+    if result.textures > 4000 then result.score = result.score + 2 end
+    if result.particles > 700 then result.score = result.score + 2 end
+    if result.lights > 450 then result.score = result.score + 1 end
+
+    if result.score >= 7 then
+        result.recommended = 3
+    elseif result.score >= 4 then
+        result.recommended = 2
+    elseif result.score >= 1 then
+        result.recommended = 1
+    else
+        result.recommended = 0
+    end
+
+    if showStatus then
+        setStatus(
+            "Mapa: " .. result.total ..
+            " objs | Parts " .. result.parts ..
+            " | Mesh " .. result.meshes ..
+            " | FX " .. (result.particles + result.effects) ..
+            " | Recomendado: " .. (stageNames[result.recommended] or "NORMAL")
+        )
+    end
+
+    return result
 end
 
 local stageNames = {
@@ -282,6 +426,7 @@ local function setFpsCap(value)
     value = tonumber(value) or 60
     value = math.clamp(value, 30, 240)
     state.fpsCap = value
+    state.targetFps = math.min(value, 90)
 
     local ok = false
     pcall(function()
@@ -343,6 +488,36 @@ local function loadConfig()
     end)
 end
 
+local function diagnostics(copyResult)
+    local lines = {
+        "Ghost Optimizer " .. VERSION,
+        "setfpscap: " .. tostring(type(setfpscap) == "function"),
+        "writefile: " .. tostring(type(writefile) == "function"),
+        "readfile: " .. tostring(type(readfile) == "function"),
+        "isfile: " .. tostring(type(isfile) == "function"),
+        "gethui: " .. tostring(type(gethui) == "function"),
+        "setclipboard: " .. tostring(type(setclipboard) == "function"),
+        "perfil: " .. (stageNames[state.stage] or tostring(state.stage)),
+        "fps: " .. tostring(currentFps),
+        "fps medio: " .. string.format("%.1f", rollingAverage(10)),
+        "propriedades alteradas: " .. tostring(modifiedProperties),
+    }
+
+    local text = table.concat(lines, "\n")
+    print("[Ghost Optimizer Diagnostico]\n" .. text)
+
+    if copyResult and type(setclipboard) == "function" then
+        pcall(function()
+            setclipboard(text)
+        end)
+        setStatus("Diagnostico copiado e enviado ao console")
+    else
+        setStatus("Diagnostico enviado ao console")
+    end
+
+    return text
+end
+
 loadConfig()
 
 -- GUI -----------------------------------------------------------------------
@@ -356,8 +531,8 @@ screen.Parent = guiParent
 
 local main = Instance.new("Frame")
 main.Name = "Main"
-main.Size = UDim2.new(0, 310, 0, 430)
-main.Position = UDim2.new(0.5, -155, 0.5, -215)
+main.Size = UDim2.new(0, 310, 0, 480)
+main.Position = UDim2.new(0.5, -155, 0.5, -240)
 main.BackgroundColor3 = Color3.fromRGB(17, 18, 23)
 main.BorderSizePixel = 0
 main.ClipsDescendants = true
@@ -434,7 +609,7 @@ content.BackgroundTransparency = 1
 content.Parent = main
 
 local monitor = Instance.new("Frame")
-monitor.Size = UDim2.new(1, 0, 0, 82)
+monitor.Size = UDim2.new(1, 0, 0, 94)
 monitor.BackgroundColor3 = Color3.fromRGB(24, 26, 34)
 monitor.BorderSizePixel = 0
 monitor.Parent = content
@@ -460,9 +635,19 @@ memLabel.Position = UDim2.new(0.66, 0, 0, 5)
 memLabel.Text = "MEM\n-- MB"
 memLabel.Parent = monitor
 
+local statsLabel = Instance.new("TextLabel")
+statsLabel.Size = UDim2.new(1, -12, 0, 18)
+statsLabel.Position = UDim2.new(0, 6, 0, 43)
+statsLabel.BackgroundTransparency = 1
+statsLabel.Text = "MIN --  |  MED --  |  MAX --  |  QUEDAS 0"
+statsLabel.TextColor3 = Color3.fromRGB(175, 180, 198)
+statsLabel.Font = Enum.Font.Gotham
+statsLabel.TextSize = 10
+statsLabel.Parent = monitor
+
 stageLabel = Instance.new("TextLabel")
 stageLabel.Size = UDim2.new(1, -12, 0, 24)
-stageLabel.Position = UDim2.new(0, 6, 1, -29)
+stageLabel.Position = UDim2.new(0, 6, 0, 65)
 stageLabel.BackgroundTransparency = 1
 stageLabel.Text = "PERFIL: NORMAL"
 stageLabel.TextColor3 = Color3.fromRGB(156, 168, 255)
@@ -471,14 +656,14 @@ stageLabel.TextSize = 12
 stageLabel.Parent = monitor
 
 local listFrame = Instance.new("Frame")
-listFrame.Size = UDim2.new(1, 0, 0, 236)
-listFrame.Position = UDim2.new(0, 0, 0, 90)
+listFrame.Size = UDim2.new(1, 0, 0, 258)
+listFrame.Position = UDim2.new(0, 0, 0, 102)
 listFrame.BackgroundTransparency = 1
 listFrame.Parent = content
 
 local grid = Instance.new("UIGridLayout")
-grid.CellSize = UDim2.new(0.5, -5, 0, 46)
-grid.CellPadding = UDim2.new(0, 10, 0, 9)
+grid.CellSize = UDim2.new(0.5, -5, 0, 38)
+grid.CellPadding = UDim2.new(0, 10, 0, 6)
 grid.FillDirectionMaxCells = 2
 grid.SortOrder = Enum.SortOrder.LayoutOrder
 grid.Parent = listFrame
@@ -490,7 +675,7 @@ local function makeButton(text, callback)
     b.Text = text
     b.TextColor3 = Color3.fromRGB(240, 242, 250)
     b.Font = Enum.Font.GothamSemibold
-    b.TextSize = 12
+    b.TextSize = 11
     b.AutoButtonColor = true
     b.Parent = listFrame
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 10)
@@ -569,9 +754,90 @@ makeButton("EMERGENCIA FPS", function()
     end)
 end)
 
+makeButton("ANALISAR MAPA", function()
+    task.spawn(function()
+        setStatus("Analisando mapa sem alterar nada...")
+        analyzeMap(true)
+    end)
+end)
+
+local function measureFpsWindow(seconds)
+    local total = 0
+    local count = 0
+    local started = os.clock()
+
+    while state.running and (os.clock() - started) < seconds do
+        total = total + currentFps
+        count = count + 1
+        task.wait(0.5)
+    end
+
+    if count == 0 then
+        return currentFps
+    end
+
+    return total / count
+end
+
+local function runBenchmark()
+    if state.benchmarkRunning then
+        setStatus("Benchmark ja esta em andamento")
+        return
+    end
+
+    state.benchmarkRunning = true
+    local oldAuto = state.auto
+    state.auto = false
+
+    if autoButton and autoButton.Parent then
+        autoButton.Text = "AUTO: OFF"
+    end
+
+    setStatus("Benchmark 1/2: medindo sem otimizacao...")
+    setStage(0, "force")
+    task.wait(1)
+    local before = measureFpsWindow(5)
+
+    setStatus("Benchmark: analisando mapa...")
+    local analysis = analyzeMap(false)
+    local recommended = analysis.recommended
+
+    if recommended == 0 then
+        recommended = 1
+    end
+
+    setStatus("Benchmark 2/2: aplicando " .. (stageNames[recommended] or "perfil") .. "...")
+    setStage(recommended, "force")
+    task.wait(1)
+    local after = measureFpsWindow(5)
+
+    local delta = after - before
+    setStatus(
+        "Benchmark | antes " .. math.floor(before + 0.5) ..
+        " FPS | depois " .. math.floor(after + 0.5) ..
+        " FPS | " .. (delta >= 0 and "+" or "") .. math.floor(delta + 0.5)
+    )
+
+    state.auto = oldAuto
+    if autoButton and autoButton.Parent then
+        autoButton.Text = "AUTO: " .. (state.auto and "ON" or "OFF")
+    end
+
+    state.benchmarkRunning = false
+    saveConfig()
+end
+
+makeButton("BENCHMARK 10S", function()
+    task.spawn(runBenchmark)
+end)
+
+makeButton("DIAGNOSTICO", function()
+    diagnostics(true)
+end)
+
 statusLabel = Instance.new("TextLabel")
-statusLabel.Size = UDim2.new(1, 0, 0, 48)
-statusLabel.Position = UDim2.new(0, 0, 1, -48)
+statusLabel.Size = UDim2.new(1, 0, 0, 44)
+statusLabel.Position = UDim2.new(0, 0, 1, -44)
 statusLabel.BackgroundColor3 = Color3.fromRGB(24, 26, 34)
 statusLabel.BorderSizePixel = 0
 statusLabel.Text = "Pronto"
@@ -630,7 +896,7 @@ connect(minimize.MouseButton1Click, function()
         main.Size = UDim2.new(0, 310, 0, 52)
         minimize.Text = "+"
     else
-        main.Size = UDim2.new(0, 310, 0, 430)
+        main.Size = UDim2.new(0, 310, 0, 480)
         minimize.Text = "-"
     end
 end)
@@ -681,8 +947,6 @@ end)
 
 local frames = 0
 local elapsed = 0
-local currentFps = 60
-local smoothFps = 60
 local lowSamples = 0
 local highSamples = 0
 
@@ -696,8 +960,29 @@ connect(RunService.RenderStepped, function(dt)
 
     if elapsed >= 0.75 then
         currentFps = math.floor((frames / elapsed) + 0.5)
-        smoothFps = math.floor((smoothFps * 0.65) + (currentFps * 0.35) + 0.5)
+
+        table.insert(fpsHistory, currentFps)
+        if #fpsHistory > 30 then
+            table.remove(fpsHistory, 1)
+        end
+
+        smoothFps = rollingAverage(10)
+        fpsMin = math.min(fpsMin, currentFps)
+        fpsMax = math.max(fpsMax, currentFps)
+        fpsSum = fpsSum + currentFps
+        fpsCount = fpsCount + 1
+
+        if currentFps < math.max(20, state.targetFps * 0.5) then
+            dropCount = dropCount + 1
+        end
+
+        local avg = fpsCount > 0 and (fpsSum / fpsCount) or currentFps
         fpsLabel.Text = "FPS\n" .. tostring(currentFps)
+        statsLabel.Text =
+            "MIN " .. tostring(fpsMin == 999 and "--" or fpsMin) ..
+            "  |  MED " .. tostring(math.floor(avg + 0.5)) ..
+            "  |  MAX " .. tostring(fpsMax) ..
+            "  |  QUEDAS " .. tostring(dropCount)
 
         frames = 0
         elapsed = 0
@@ -733,31 +1018,34 @@ task.spawn(function()
     end
 end)
 
--- Auto Optimizer com histerese e cooldown para evitar ficar trocando toda hora.
+-- Auto Optimizer 2.0: media movel + histerese + cooldown.
 task.spawn(function()
     while state.running do
         task.wait(3)
 
-        if state.auto and state.running then
+        if state.auto and state.running and not state.benchmarkRunning then
+            local avgFps = rollingAverage(10)
+            local target = math.max(30, state.targetFps)
+            local ratio = avgFps / target
             local desired = state.stage
 
-            if smoothFps < 25 then
+            if ratio < 0.45 then
                 desired = 3
-                lowSamples = lowSamples + 1
+                lowSamples = lowSamples + 2
                 highSamples = 0
-            elseif smoothFps < 38 then
+            elseif ratio < 0.65 then
                 desired = math.max(state.stage, 2)
                 lowSamples = lowSamples + 1
                 highSamples = 0
-            elseif smoothFps < 50 then
+            elseif ratio < 0.82 then
                 desired = math.max(state.stage, 1)
                 lowSamples = lowSamples + 1
                 highSamples = 0
-            elseif smoothFps >= 57 then
+            elseif ratio >= 0.94 then
                 highSamples = highSamples + 1
                 lowSamples = 0
 
-                if highSamples >= 4 then
+                if highSamples >= 5 then
                     desired = math.max(0, state.stage - 1)
                     highSamples = 0
                 end
@@ -766,11 +1054,15 @@ task.spawn(function()
                 highSamples = 0
             end
 
-            local cooldownReady = (os.clock() - state.lastStageChange) >= 8
+            local cooldownReady = (os.clock() - state.lastStageChange) >= 10
 
             if desired ~= state.stage and cooldownReady then
-                if desired > state.stage or lowSamples >= 2 or smoothFps >= 57 then
+                local canRaiseOptimization = desired > state.stage and lowSamples >= 2
+                local canRecoverQuality = desired < state.stage and ratio >= 0.94
+
+                if canRaiseOptimization or canRecoverQuality then
                     task.spawn(function()
+                        setStatus("AUTO 2.0: " .. math.floor(avgFps + 0.5) .. " FPS medio")
                         setStage(desired)
                     end)
                     lowSamples = 0

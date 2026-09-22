@@ -1,5 +1,5 @@
 --[[
-    STUDIO LIFE MAP GENERATOR PRO V3
+    STUDIO LIFE MAP GENERATOR PRO V3.0.1
     Gerador procedural de mapas em Luau.
     Painel mobile/PC, presets, biomas, terrain opcional, natureza, cidades,
     iluminação, seed, progresso, pausa/cancelamento, undo/redo e validação.
@@ -22,7 +22,7 @@ end
 local Terrain = Workspace.Terrain
 
 local CONFIG = {
-    Version = "3.0.0",
+    Version = "3.0.1",
     FolderName = "StudioLife_MapGenerator_PRO",
     Seed = math.random(1, 999999),
     Size = 320,
@@ -1359,12 +1359,16 @@ end
 local function failMap(name, err)
     runtime.busy = false
     runtime.cancel = false
+    local recovered = false
     if CONFIG.AutoRecover then
-        restoreRecovery()
+        recovered = restoreRecovery()
     end
     warn("[MapGen] " .. tostring(err))
     logEvent("ERRO", name .. " • " .. tostring(err))
-    setStatus("Erro em " .. name .. ": recuperação aplicada", runtime.progress)
+    setStatus(
+        "Erro em " .. name .. (recovered and " • estado anterior restaurado" or " • veja Logs"),
+        runtime.progress
+    )
 end
 
 local function naturalMap(name, biomeName, natureCount, islandMode, mountainBoost)
@@ -2115,10 +2119,12 @@ loadPersistentState()
 
 local guiParent
 pcall(function()
-    if gethui then guiParent = gethui() end
+    if type(gethui) == "function" then
+        guiParent = gethui()
+    end
 end)
 if not guiParent then
-    guiParent = player:WaitForChild("PlayerGui")
+    guiParent = player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui")
 end
 
 local oldGui = guiParent:FindFirstChild("StudioLifeMapGeneratorPRO")
@@ -2171,7 +2177,7 @@ local title = Instance.new("TextLabel")
 title.Position = UDim2.fromOffset(15,7)
 title.Size = UDim2.new(1,-100,0,27)
 title.BackgroundTransparency = 1
-title.Text = "MAP GENERATOR PRO V3"
+title.Text = "MAP GENERATOR PRO V3.0.1"
 title.TextColor3 = COLORS.text
 title.Font = Enum.Font.GothamBold
 title.TextSize = 17
@@ -2434,7 +2440,8 @@ section(terrainTab, "TERRAIN E RELEVO")
 local terrainToggle
 terrainToggle = addButton(terrainTab, "Terrain real: DESLIGADO", function()
     CONFIG.UseTerrain = not CONFIG.UseTerrain
-    terrainToggle.Text = "Terrain real: " .. (CONFIG.UseTerrain and "LIGADO" or "DESLIGADO")\n    savePersistentState()
+    terrainToggle.Text = "Terrain real: " .. (CONFIG.UseTerrain and "LIGADO" or "DESLIGADO")
+    savePersistentState()
     setStatus("Terrain real " .. (CONFIG.UseTerrain and "ativado" or "desativado"), runtime.progress)
 end)
 
@@ -2444,7 +2451,8 @@ sizeBtn = addButton(terrainTab, "Tamanho: " .. CONFIG.Size, function()
     local idx = table.find(values, CONFIG.Size) or 2
     idx = idx % #values + 1
     CONFIG.Size = values[idx]
-    sizeBtn.Text = "Tamanho: " .. CONFIG.Size\n    savePersistentState()
+    sizeBtn.Text = "Tamanho: " .. CONFIG.Size
+    savePersistentState()
 end)
 
 local heightBtn
@@ -2453,13 +2461,15 @@ heightBtn = addButton(terrainTab, "Relevo: " .. CONFIG.HeightAmplitude, function
     local idx = table.find(values, CONFIG.HeightAmplitude) or 3
     idx = idx % #values + 1
     CONFIG.HeightAmplitude = values[idx]
-    heightBtn.Text = "Relevo: " .. CONFIG.HeightAmplitude\n    savePersistentState()
+    heightBtn.Text = "Relevo: " .. CONFIG.HeightAmplitude
+    savePersistentState()
 end)
 
 local waterBtn
 waterBtn = addButton(terrainTab, "Água: LIGADA", function()
     CONFIG.Water = not CONFIG.Water
-    waterBtn.Text = "Água: " .. (CONFIG.Water and "LIGADA" or "DESLIGADA")\n    savePersistentState()
+    waterBtn.Text = "Água: " .. (CONFIG.Water and "LIGADA" or "DESLIGADA")
+    savePersistentState()
 end)
 
 addInfo(terrainTab, "Terrain real é opcional. O padrão usa peças para evitar mexer no Terrain existente do mapa.")
@@ -2626,7 +2636,7 @@ seedBtn = addButton(systemTab, "Nova seed", function()
 end)
 
 addButton(systemTab, "Copiar seed", function()
-    if setclipboard then
+    if type(setclipboard) == "function" then
         pcall(setclipboard, tostring(CONFIG.Seed))
         setStatus("Seed copiada", runtime.progress)
     else
@@ -2854,4 +2864,4 @@ _G.StudioLifeMapGeneratorPRO = {
     Version = CONFIG.Version
 }
 
-print("[MapGen] Studio Life Map Generator PRO V3 carregado.")
+print("[MapGen] Studio Life Map Generator PRO V3.0.1 carregado.")

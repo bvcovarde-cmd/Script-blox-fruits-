@@ -171,8 +171,10 @@ local function logEvent(level, message)
         table.remove(runtime.logs, 1)
     end
     if UI.logsBox then
-        UI.logsBox.Text = table.concat(runtime.logs, "\n")
-        UI.logsBox.CursorPosition = #UI.logsBox.Text + 1
+        pcall(function()
+            UI.logsBox.Text = table.concat(runtime.logs, "\n")
+            UI.logsBox.CursorPosition = #UI.logsBox.Text + 1
+        end)
     end
 end
 
@@ -261,7 +263,32 @@ local function loadPersistentState()
     return true
 end
 
+local function sanitizeConfig()
+    CONFIG.Size = math.clamp(tonumber(CONFIG.Size) or 320, 180, 560)
+    CONFIG.Density = math.clamp(tonumber(CONFIG.Density) or 1, 0.45, 1.6)
+    CONFIG.HeightAmplitude = math.clamp(tonumber(CONFIG.HeightAmplitude) or 28, 8, 70)
+    CONFIG.RoadDensity = math.clamp(tonumber(CONFIG.RoadDensity) or 1, 0.55, 1.6)
+    CONFIG.BuildingDensity = math.clamp(tonumber(CONFIG.BuildingDensity) or 1, 0.55, 1.6)
+    CONFIG.HistoryLimit = math.clamp(math.floor(tonumber(CONFIG.HistoryLimit) or 6), 1, 8)
+
+    if not QUALITY[CONFIG.Quality] then
+        CONFIG.Quality = "Mobile"
+    end
+    if not BIOMES[CONFIG.Biome] then
+        CONFIG.Biome = "Floresta"
+    end
+
+    local validThemes = {
+        Dia=true, Noite=true, PorDoSol=true, Nevoa=true, Terror=true,
+        Cyberpunk=true, Fantasia=true, Alien=true, Neve=true
+    }
+    if not validThemes[CONFIG.Theme] then
+        CONFIG.Theme = "Dia"
+    end
+end
+
 local function currentQuality()
+    sanitizeConfig()
     local q = QUALITY[CONFIG.Quality] or QUALITY.Mobile
     CONFIG.MaxObjects = q.max
     CONFIG.ChunkStep = q.chunk

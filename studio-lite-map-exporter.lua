@@ -1,18 +1,60 @@
--- Studio Lite Map Exporter Mobile V4 — Lua Export
--- Exporta somente objetos/propriedades visíveis ao cliente.
--- NÃO usa JSONEncode: gera um arquivo .lua ASCII-safe e evita "Can't convert to JSON".
+--==============================================================
+-- StudioLite Map Exporter Mobile V5
+-- Export de alta fidelidade, com IDs internos + referências.
+-- Processamento em lotes para reduzir travamentos no celular.
+--
+-- Limite inevitável:
+-- exporta somente dados visíveis ao cliente/ambiente atual.
+--==============================================================
 
 local Players = game:GetService("Players")
-local CollectionService = game:GetService("CollectionService")
+local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ReplicatedFirst = game:GetService("ReplicatedFirst")
+local StarterGui = game:GetService("StarterGui")
+local StarterPack = game:GetService("StarterPack")
+local StarterPlayer = game:GetService("StarterPlayer")
+local SoundService = game:GetService("SoundService")
+local MaterialService = game:GetService("MaterialService")
+local CollectionService = game:GetService("CollectionService")
+local PhysicsService = game:GetService("PhysicsService")
 local UIS = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
 
 -------------------------------------------------
--- APIs DO AMBIENTE
+-- CONFIG
+-------------------------------------------------
+local CONFIG = {
+    ExportWorkspace = true,
+    ExportLightingChildren = true,
+    ExportReplicatedStorage = true,
+    ExportReplicatedFirst = true,
+    ExportStarterGui = true,
+    ExportStarterPack = true,
+    ExportStarterPlayer = true,
+    ExportSoundService = true,
+    ExportMaterialService = true,
+
+    ExportAttributes = true,
+    ExportTags = true,
+    ExportReferences = true,
+    ExportTerrain = true,
+    ExportCollisionGroups = true,
+
+    -- Segurança de memória no celular.
+    TerrainResolution = 4,
+    TerrainChunkCells = 12,
+    MaxTerrainCells = 450000,
+
+    BatchSize = 120,
+    SaveFolder = "StudioLiteExports",
+    PrintProgress = true,
+}
+
+-------------------------------------------------
+-- API DO AMBIENTE
 -------------------------------------------------
 local function getGlobal(name)
     local ok, env
@@ -38,41 +80,27 @@ local function getGlobal(name)
     return nil
 end
 
-local API_NAMES = {
-    "writefile","readfile","isfile","makefolder",
-    "isfolder","listfiles","setclipboard",
-    "getclipboard","getworkspace","gethui"
+local API = {
+    writefile = getGlobal("writefile"),
+    readfile = getGlobal("readfile"),
+    isfile = getGlobal("isfile"),
+    makefolder = getGlobal("makefolder"),
+    setclipboard = getGlobal("setclipboard"),
+    getworkspace = getGlobal("getworkspace"),
+    gethui = getGlobal("gethui"),
 }
 
-local API = {}
-
-local function detectAPIs()
-    for _, name in ipairs(API_NAMES) do
-        local fn = getGlobal(name)
-        API[name] = type(fn) == "function" and fn or nil
+-------------------------------------------------
+-- LOG
+-------------------------------------------------
+local function log(message)
+    if CONFIG.PrintProgress then
+        print("[StudioLite Exporter V5] "..tostring(message))
     end
-end
-
-detectAPIs()
-
-local function getWorkspacePath()
-    if not API.getworkspace then
-        return nil
-    end
-
-    local ok, path = pcall(API.getworkspace)
-
-    if ok and type(path) == "string" and path ~= "" then
-        path = path:gsub("\\", "/")
-        path = path:gsub("/+$", "")
-        return path
-    end
-
-    return nil
 end
 
 -------------------------------------------------
--- SERIALIZAÇÃO DE PROPRIEDADES ROBLOX
+-- SERIALIZAÇÃO DE TIPOS ROBLOX
 -------------------------------------------------
 local function finiteNumber(n)
     if type(n) ~= "number" or n ~= n or n == math.huge or n == -math.huge then
@@ -81,88 +109,87 @@ local function finiteNumber(n)
     return n
 end
 
-local function ser(v)
-    local t = typeof(v)
+local function serializeValue(value)
+    local t = typeof(value)
 
     if t == "nil" then
         return nil
     elseif t == "string" or t == "boolean" then
-        return v
+        return value
     elseif t == "number" then
-        return finiteNumber(v)
+        return finiteNumber(value)
     elseif t == "Vector2" then
-        return {__type="Vector2",x=finiteNumber(v.X),y=finiteNumber(v.Y)}
+        return {__type="Vector2",x=value.X,y=value.Y}
     elseif t == "Vector3" then
-        return {
-            __type="Vector3",
-            x=finiteNumber(v.X),
-            y=finiteNumber(v.Y),
-            z=finiteNumber(v.Z)
-        }
+        return {__type="Vector3",x=value.X,y=value.Y,z=value.Z}
+    elseif t == "Vector3int16" then
+        return {__type="Vector3int16",x=value.X,y=value.Y,z=value.Z}
     elseif t == "Color3" then
-        return {
-            __type="Color3",
-            r=finiteNumber(v.R),
-            g=finiteNumber(v.G),
-            b=finiteNumber(v.B)
-        }
+        return {__type="Color3",r=value.R,g=value.G,b=value.B}
     elseif t == "CFrame" then
-        local values = {v:GetComponents()}
+        local values = {value:GetComponents()}
         for i = 1, #values do
             values[i] = finiteNumber(values[i])
         end
         return {__type="CFrame",values=values}
     elseif t == "UDim" then
-        return {
-            __type="UDim",
-            scale=finiteNumber(v.Scale),
-            offset=finiteNumber(v.Offset)
-        }
+        return {__type="UDim",scale=value.Scale,offset=value.Offset}
     elseif t == "UDim2" then
         return {
             __type="UDim2",
-            xs=finiteNumber(v.X.Scale),
-            xo=finiteNumber(v.X.Offset),
-            ys=finiteNumber(v.Y.Scale),
-            yo=finiteNumber(v.Y.Offset)
+            xs=value.X.Scale,
+            xo=value.X.Offset,
+            ys=value.Y.Scale,
+            yo=value.Y.Offset
         }
     elseif t == "NumberRange" then
+        return {__type="NumberRange",min=value.Min,max=value.Max}
+    elseif t == "Rect" then
         return {
-            __type="NumberRange",
-            min=finiteNumber(v.Min),
-            max=finiteNumber(v.Max)
+            __type="Rect",
+            min=serializeValue(value.Min),
+            max=serializeValue(value.Max)
         }
     elseif t == "EnumItem" then
-        return {__type="EnumItem",value=tostring(v)}
+        return {__type="EnumItem",value=tostring(value)}
     elseif t == "BrickColor" then
-        return {__type="BrickColor",number=v.Number,name=v.Name}
+        return {__type="BrickColor",number=value.Number,name=value.Name}
     elseif t == "ColorSequence" then
         local out = {__type="ColorSequence",keypoints={}}
-        for _, k in ipairs(v.Keypoints) do
-            table.insert(out.keypoints,{
-                time=finiteNumber(k.Time),
-                color=ser(k.Value)
-            })
+        for _, kp in ipairs(value.Keypoints) do
+            out.keypoints[#out.keypoints + 1] = {
+                time=finiteNumber(kp.Time),
+                color=serializeValue(kp.Value)
+            }
         end
         return out
     elseif t == "NumberSequence" then
         local out = {__type="NumberSequence",keypoints={}}
-        for _, k in ipairs(v.Keypoints) do
-            table.insert(out.keypoints,{
-                time=finiteNumber(k.Time),
-                value=finiteNumber(k.Value),
-                envelope=finiteNumber(k.Envelope)
-            })
+        for _, kp in ipairs(value.Keypoints) do
+            out.keypoints[#out.keypoints + 1] = {
+                time=finiteNumber(kp.Time),
+                value=finiteNumber(kp.Value),
+                envelope=finiteNumber(kp.Envelope)
+            }
         end
         return out
+    elseif t == "PhysicalProperties" then
+        return {
+            __type="PhysicalProperties",
+            density=value.Density,
+            friction=value.Friction,
+            elasticity=value.Elasticity,
+            frictionWeight=value.FrictionWeight,
+            elasticityWeight=value.ElasticityWeight
+        }
     end
 
-    return tostring(v)
+    return tostring(value)
 end
 
-local function safeGet(obj, prop)
+local function safeGet(instance, property)
     local ok, value = pcall(function()
-        return obj[prop]
+        return instance[property]
     end)
 
     if ok then
@@ -172,145 +199,373 @@ local function safeGet(obj, prop)
     return nil
 end
 
-local function addProp(tbl, obj, prop, key)
-    local value = safeGet(obj, prop)
+local function addProperty(out, instance, property, key)
+    local value = safeGet(instance,property)
 
     if value ~= nil then
-        tbl[key or prop] = ser(value)
+        out[key or property] = serializeValue(value)
     end
 end
 
-local function pathOf(obj)
-    local ok, full = pcall(function()
-        return obj:GetFullName()
-    end)
-
-    if ok and type(full) == "string" then
-        return full
-    end
-
-    return tostring(obj.Name)
-end
-
 -------------------------------------------------
--- ASSETS / PROPRIEDADES
+-- PROPRIEDADES
 -------------------------------------------------
-local ASSET_PROPS = {
-    MeshPart={"MeshId","TextureID"},
-    SpecialMesh={"MeshId","TextureId"},
-    Decal={"Texture"},
-    Texture={"Texture"},
-    Sound={"SoundId"},
-    Animation={"AnimationId"},
-    ParticleEmitter={"Texture"},
-    Beam={"Texture"},
-    Trail={"Texture"},
-    SurfaceAppearance={"ColorMap","MetalnessMap","NormalMap","RoughnessMap"},
-    ImageLabel={"Image"},
-    ImageButton={"Image"},
-    VideoFrame={"Video"},
-    Shirt={"ShirtTemplate"},
-    Pants={"PantsTemplate"},
-    ShirtGraphic={"Graphic"},
-    Sky={
-        "SkyboxBk","SkyboxDn","SkyboxFt","SkyboxLf",
-        "SkyboxRt","SkyboxUp","SunTextureId","MoonTextureId"
-    }
+local COMMON_PROPERTIES = {
+    "Archivable"
 }
 
-local COMMON_PROPS = {"Name","Archivable"}
-
-local CLASS_PROPS = {
+local CLASS_PROPERTIES = {
     BasePart={
-        "CFrame","Size","Color","Material","MaterialVariant",
-        "Transparency","Reflectance","Anchored","CanCollide",
-        "CanTouch","CanQuery","CastShadow","CollisionGroup","Massless"
+        "CFrame","Size","Color","BrickColor","Material","MaterialVariant",
+        "Transparency","Reflectance","Anchored","CanCollide","CanTouch",
+        "CanQuery","CastShadow","CollisionGroup","Massless",
+        "RootPriority","CustomPhysicalProperties"
     },
     Part={"Shape"},
-    MeshPart={"MeshId","TextureID","DoubleSided","RenderFidelity","CollisionFidelity"},
-    SpecialMesh={"MeshId","TextureId","MeshType","Scale","Offset","VertexColor"},
-    Decal={"Texture","Color3","Transparency","Face"},
-    Texture={
-        "Texture","Color3","Transparency","Face",
-        "StudsPerTileU","StudsPerTileV","OffsetStudsU","OffsetStudsV"
+    MeshPart={
+        "MeshId","TextureID","DoubleSided","RenderFidelity",
+        "CollisionFidelity"
     },
-    Attachment={"CFrame","Position","Orientation","Axis","SecondaryAxis","Visible"},
-    Sound={
-        "SoundId","Volume","PlaybackSpeed","Looped",
-        "RollOffMaxDistance","RollOffMinDistance","RollOffMode","EmitterSize"
+    SpecialMesh={
+        "MeshId","TextureId","MeshType","Scale","Offset","VertexColor"
     },
+    Model={"WorldPivot","LevelOfDetail","ModelStreamingMode"},
+    Attachment={
+        "CFrame","Position","Orientation","Axis","SecondaryAxis","Visible"
+    },
+    Weld={"C0","C1","Enabled"},
+    Motor6D={"C0","C1","Enabled","Transform"},
+    Snap={"C0","C1","Enabled"},
+    ManualWeld={"C0","C1","Enabled"},
+    Rotate={"C0","C1","Enabled"},
+    Glue={"C0","C1","Enabled"},
+    WeldConstraint={"Enabled"},
+    HingeConstraint={
+        "ActuatorType","AngularSpeed","AngularVelocity","LimitsEnabled",
+        "LowerAngle","UpperAngle","MotorMaxAcceleration","MotorMaxTorque",
+        "Radius","Restitution","ServoMaxTorque","TargetAngle"
+    },
+    BallSocketConstraint={
+        "LimitsEnabled","MaxFrictionTorque","Radius",
+        "Restitution","TwistLimitsEnabled","TwistLowerAngle",
+        "TwistUpperAngle","UpperAngle"
+    },
+    RopeConstraint={
+        "Length","Restitution","Thickness","Visible","WinchEnabled",
+        "WinchForce","WinchResponsiveness","WinchSpeed","WinchTarget"
+    },
+    RodConstraint={"Length","LimitAngle0","LimitAngle1","Thickness","Visible"},
+    SpringConstraint={
+        "Coils","Damping","FreeLength","LimitsEnabled","MaxForce",
+        "MaxLength","MinLength","Radius","Stiffness","Thickness","Visible"
+    },
+    CylindricalConstraint={
+        "ActuatorType","AngularActuatorType","AngularLimitsEnabled",
+        "AngularRestitution","AngularSpeed","AngularVelocity",
+        "InclinationAngle","LimitsEnabled","LinearResponsiveness",
+        "LowerAngle","LowerLimit","MotorMaxAngularAcceleration",
+        "MotorMaxForce","MotorMaxTorque","RotationAxisVisible",
+        "ServoMaxForce","ServoMaxTorque","Speed","TargetAngle",
+        "TargetPosition","UpperAngle","UpperLimit","Velocity"
+    },
+    PrismaticConstraint={
+        "ActuatorType","LimitsEnabled","LinearResponsiveness",
+        "LowerLimit","MotorMaxAcceleration","MotorMaxForce",
+        "Restitution","ServoMaxForce","Size","Speed",
+        "TargetPosition","UpperLimit","Velocity"
+    },
+    AlignPosition={
+        "ApplyAtCenterOfMass","ForceLimitMode","MaxAxesForce",
+        "MaxForce","MaxVelocity","Mode","Position","ReactionForceEnabled",
+        "Responsiveness","RigidityEnabled"
+    },
+    AlignOrientation={
+        "AlignType","CFrame","MaxAngularVelocity","MaxTorque",
+        "Mode","PrimaryAxis","PrimaryAxisOnly","ReactionTorqueEnabled",
+        "Responsiveness","RigidityEnabled","SecondaryAxis"
+    },
+    VectorForce={"ApplyAtCenterOfMass","Force","RelativeTo"},
+    LineForce={"ApplyAtCenterOfMass","InverseSquareLaw","Magnitude","MaxForce","ReactionForceEnabled"},
+    Torque={"RelativeTo","Torque"},
+    AngularVelocity={"AngularVelocity","MaxTorque","ReactionTorqueEnabled","RelativeTo"},
+    LinearVelocity={"LineDirection","LineVelocity","MaxAxesForce","MaxForce","PlaneVelocity","PrimaryTangentAxis","RelativeTo","SecondaryTangentAxis","VectorVelocity","VelocityConstraintMode"},
+    Decal={"Texture","Color3","Transparency","Face","ZIndex"},
+    Texture={"Texture","Color3","Transparency","Face","StudsPerTileU","StudsPerTileV","OffsetStudsU","OffsetStudsV","ZIndex"},
+    SurfaceAppearance={"ColorMap","MetalnessMap","NormalMap","RoughnessMap","AlphaMode"},
+    Sound={"SoundId","Volume","PlaybackSpeed","Looped","TimePosition","RollOffMaxDistance","RollOffMinDistance","RollOffMode","EmitterSize","Playing"},
     ParticleEmitter={
-        "Texture","Enabled","Rate","Lifetime","Speed",
-        "LightEmission","LightInfluence","LockedToPart",
-        "Orientation","Rotation","RotSpeed","SpreadAngle",
-        "VelocityInheritance","Color","Transparency","Size"
+        "Texture","Enabled","Rate","Lifetime","Speed","LightEmission",
+        "LightInfluence","LockedToPart","Orientation","Rotation",
+        "RotSpeed","SpreadAngle","VelocityInheritance","Color",
+        "Transparency","Size","Acceleration","Drag","EmissionDirection",
+        "FlipbookFramerate","FlipbookLayout","FlipbookMode",
+        "FlipbookStartRandom","Shape","ShapeInOut","ShapePartial",
+        "ShapeStyle","Squash","TimeScale","WindAffectsDrag"
     },
     Beam={
         "Texture","TextureLength","TextureMode","TextureSpeed",
-        "Width0","Width1","CurveSize0","CurveSize1",
-        "FaceCamera","LightEmission","LightInfluence",
-        "Color","Transparency","Segments"
+        "Width0","Width1","CurveSize0","CurveSize1","FaceCamera",
+        "LightEmission","LightInfluence","Color","Transparency",
+        "Segments","ZOffset","Enabled"
     },
     Trail={
-        "Texture","TextureLength","TextureMode","Lifetime",
-        "MinLength","FaceCamera","LightEmission","LightInfluence",
-        "Color","Transparency","WidthScale"
+        "Texture","TextureLength","TextureMode","Lifetime","MinLength",
+        "FaceCamera","LightEmission","LightInfluence","Color",
+        "Transparency","WidthScale","Enabled"
     },
+    Smoke={"Color","Enabled","Opacity","RiseVelocity","Size","TimeScale"},
+    Fire={"Color","Enabled","Heat","SecondaryColor","Size","TimeScale"},
+    Sparkles={"Enabled","SparkleColor","TimeScale"},
     PointLight={"Brightness","Color","Enabled","Range","Shadows"},
     SpotLight={"Brightness","Color","Enabled","Range","Shadows","Angle","Face"},
     SurfaceLight={"Brightness","Color","Enabled","Range","Shadows","Angle","Face"},
-    SurfaceAppearance={"ColorMap","MetalnessMap","NormalMap","RoughnessMap","AlphaMode"},
-    Model={"WorldPivot","LevelOfDetail"},
+    Atmosphere={"Color","Decay","Density","Glare","Haze","Offset"},
+    BloomEffect={"Enabled","Intensity","Size","Threshold"},
+    BlurEffect={"Enabled","Size"},
+    ColorCorrectionEffect={"Enabled","Brightness","Contrast","Saturation","TintColor"},
+    DepthOfFieldEffect={"Enabled","FarIntensity","FocusDistance","InFocusRadius","NearIntensity"},
+    SunRaysEffect={"Enabled","Intensity","Spread"},
+    Sky={"CelestialBodiesShown","MoonAngularSize","MoonTextureId","SkyboxBk","SkyboxDn","SkyboxFt","SkyboxLf","SkyboxOrientation","SkyboxRt","SkyboxUp","StarCount","SunAngularSize","SunTextureId"},
+    Clouds={"Color","Cover","Density","Enabled"},
+    BillboardGui={
+        "Active","AlwaysOnTop","Brightness","ClipsDescendants","Enabled",
+        "LightInfluence","MaxDistance","Size","SizeOffset","StudsOffset",
+        "StudsOffsetWorldSpace"
+    },
+    SurfaceGui={
+        "Active","AlwaysOnTop","Brightness","CanvasSize","ClipsDescendants",
+        "Enabled","Face","LightInfluence","MaxDistance","PixelsPerStud",
+        "SizingMode","ToolPunchThroughDistance","ZOffset"
+    },
+    ScreenGui={"DisplayOrder","Enabled","IgnoreGuiInset","ResetOnSpawn","ZIndexBehavior","SafeAreaCompatibility","ScreenInsets"},
+    GuiObject={
+        "Active","AnchorPoint","AutomaticSize","BackgroundColor3",
+        "BackgroundTransparency","BorderColor3","BorderMode","BorderSizePixel",
+        "ClipsDescendants","LayoutOrder","Position","Rotation","Selectable",
+        "SelectionOrder","Size","Visible","ZIndex"
+    },
+    TextLabel={
+        "ContentText","Font","FontFace","LineHeight","MaxVisibleGraphemes",
+        "RichText","Text","TextColor3","TextDirection","TextScaled",
+        "TextSize","TextStrokeColor3","TextStrokeTransparency",
+        "TextTransparency","TextTruncate","TextWrapped","TextXAlignment",
+        "TextYAlignment"
+    },
+    TextButton={
+        "AutoButtonColor","ContentText","Font","FontFace","LineHeight",
+        "MaxVisibleGraphemes","Modal","RichText","Selected","Style",
+        "Text","TextColor3","TextDirection","TextScaled","TextSize",
+        "TextStrokeColor3","TextStrokeTransparency","TextTransparency",
+        "TextTruncate","TextWrapped","TextXAlignment","TextYAlignment"
+    },
+    TextBox={
+        "ClearTextOnFocus","ContentText","CursorPosition","Font","FontFace",
+        "LineHeight","MaxVisibleGraphemes","MultiLine","PlaceholderColor3",
+        "PlaceholderText","RichText","SelectionStart","ShowNativeInput",
+        "Text","TextColor3","TextDirection","TextEditable","TextScaled",
+        "TextSize","TextStrokeColor3","TextStrokeTransparency",
+        "TextTransparency","TextTruncate","TextWrapped","TextXAlignment",
+        "TextYAlignment"
+    },
+    ImageLabel={
+        "Image","ImageColor3","ImageRectOffset","ImageRectSize",
+        "ImageTransparency","ResampleMode","ScaleType","SliceCenter",
+        "SliceScale","TileSize"
+    },
+    ImageButton={
+        "AutoButtonColor","Image","ImageColor3","ImageRectOffset",
+        "ImageRectSize","ImageTransparency","Modal","ResampleMode",
+        "ScaleType","Selected","SliceCenter","SliceScale","Style","TileSize"
+    },
+    Frame={"Style"},
+    ScrollingFrame={
+        "AutomaticCanvasSize","BottomImage","CanvasPosition","CanvasSize",
+        "ElasticBehavior","HorizontalScrollBarInset","MidImage",
+        "ScrollBarImageColor3","ScrollBarImageTransparency",
+        "ScrollBarThickness","ScrollingDirection","ScrollingEnabled",
+        "TopImage","VerticalScrollBarInset","VerticalScrollBarPosition"
+    },
+    UIStroke={"ApplyStrokeMode","Color","Enabled","LineJoinMode","Thickness","Transparency"},
+    UIGradient={"Color","Enabled","Offset","Rotation","Transparency"},
+    UICorner={"CornerRadius"},
+    UIAspectRatioConstraint={"AspectRatio","AspectType","DominantAxis"},
+    UIScale={"Scale"},
+    UIPadding={"PaddingBottom","PaddingLeft","PaddingRight","PaddingTop"},
+    UIListLayout={"FillDirection","HorizontalAlignment","HorizontalFlex","ItemLineAlignment","Padding","SortOrder","VerticalAlignment","VerticalFlex","Wraps"},
+    UIGridLayout={"CellPadding","CellSize","FillDirection","FillDirectionMaxCells","HorizontalAlignment","SortOrder","StartCorner","VerticalAlignment"},
+    UITableLayout={"FillEmptySpaceColumns","FillEmptySpaceRows","MajorAxis","Padding"},
+    ProximityPrompt={
+        "ActionText","ClickablePrompt","Enabled","Exclusivity",
+        "GamepadKeyCode","HoldDuration","KeyboardKeyCode",
+        "MaxActivationDistance","ObjectText","RequiresLineOfSight","Style"
+    },
+    ClickDetector={"CursorIcon","MaxActivationDistance"},
+    Highlight={"DepthMode","Enabled","FillColor","FillTransparency","OutlineColor","OutlineTransparency"},
+    SpawnLocation={"AllowTeamChangeOnTouch","Duration","Enabled","Neutral","TeamColor"},
+    Seat={"Disabled","Occupant"},
+    VehicleSeat={"Disabled","HeadsUpDisplay","MaxSpeed","Steer","SteerFloat","Throttle","ThrottleFloat","Torque","TurnSpeed"},
     Animation={"AnimationId"},
     Shirt={"ShirtTemplate","Color3"},
     Pants={"PantsTemplate","Color3"},
-    ShirtGraphic={"Graphic","Color3"}
+    ShirtGraphic={"Graphic","Color3"},
+    MaterialVariant={"BaseMaterial","ColorMap","MaterialPattern","MetalnessMap","NormalMap","RoughnessMap","StudsPerTile"},
 }
 
-local function collectProperties(obj)
-    local out = {}
+-------------------------------------------------
+-- REFERÊNCIAS ENTRE OBJETOS
+-------------------------------------------------
+local REFERENCE_PROPERTIES = {
+    Model={"PrimaryPart"},
+    Weld={"Part0","Part1"},
+    Motor6D={"Part0","Part1"},
+    Snap={"Part0","Part1"},
+    ManualWeld={"Part0","Part1"},
+    Rotate={"Part0","Part1"},
+    Glue={"Part0","Part1"},
+    WeldConstraint={"Part0","Part1"},
+    HingeConstraint={"Attachment0","Attachment1"},
+    BallSocketConstraint={"Attachment0","Attachment1"},
+    RopeConstraint={"Attachment0","Attachment1"},
+    RodConstraint={"Attachment0","Attachment1"},
+    SpringConstraint={"Attachment0","Attachment1"},
+    CylindricalConstraint={"Attachment0","Attachment1"},
+    PrismaticConstraint={"Attachment0","Attachment1"},
+    AlignPosition={"Attachment0","Attachment1"},
+    AlignOrientation={"Attachment0","Attachment1"},
+    VectorForce={"Attachment0"},
+    LineForce={"Attachment0","Attachment1"},
+    Torque={"Attachment0"},
+    AngularVelocity={"Attachment0"},
+    LinearVelocity={"Attachment0"},
+    Beam={"Attachment0","Attachment1"},
+    Trail={"Attachment0","Attachment1"},
+    BillboardGui={"Adornee"},
+    SurfaceGui={"Adornee"},
+    Highlight={"Adornee"},
+    ObjectValue={"Value"},
+}
 
-    for _, prop in ipairs(COMMON_PROPS) do
-        addProp(out,obj,prop)
+-------------------------------------------------
+-- ROOTS EXPORTADOS
+-------------------------------------------------
+local ROOTS = {}
+
+local function addRoot(name, object, enabled)
+    if enabled and object then
+        ROOTS[#ROOTS + 1] = {
+            name=name,
+            object=object
+        }
+    end
+end
+
+addRoot("Workspace",Workspace,CONFIG.ExportWorkspace)
+addRoot("Lighting",Lighting,CONFIG.ExportLightingChildren)
+addRoot("ReplicatedStorage",ReplicatedStorage,CONFIG.ExportReplicatedStorage)
+addRoot("ReplicatedFirst",ReplicatedFirst,CONFIG.ExportReplicatedFirst)
+addRoot("StarterGui",StarterGui,CONFIG.ExportStarterGui)
+addRoot("StarterPack",StarterPack,CONFIG.ExportStarterPack)
+addRoot("StarterPlayer",StarterPlayer,CONFIG.ExportStarterPlayer)
+addRoot("SoundService",SoundService,CONFIG.ExportSoundService)
+addRoot("MaterialService",MaterialService,CONFIG.ExportMaterialService)
+
+-------------------------------------------------
+-- FILTROS
+-------------------------------------------------
+local function shouldSkip(instance)
+    local char = LocalPlayer and LocalPlayer.Character
+
+    if char and (instance == char or instance:IsDescendantOf(char)) then
+        return true
     end
 
-    for className, props in pairs(CLASS_PROPS) do
-        if obj:IsA(className) then
-            for _, prop in ipairs(props) do
-                addProp(out,obj,prop)
+    return false
+end
+
+-------------------------------------------------
+-- COLETA / IDs
+-------------------------------------------------
+local function collectInstances(progress)
+    local entries = {}
+    local idByInstance = {}
+    local nextId = 1
+    local seen = {}
+
+    for _, root in ipairs(ROOTS) do
+        local descendants = root.object:GetDescendants()
+
+        for _, instance in ipairs(descendants) do
+            if not shouldSkip(instance) and not seen[instance] then
+                seen[instance] = true
+                idByInstance[instance] = nextId
+
+                entries[#entries + 1] = {
+                    id=nextId,
+                    root=root.name,
+                    instance=instance
+                }
+
+                nextId = nextId + 1
+
+                if CONFIG.BatchSize > 0
+                    and #entries % CONFIG.BatchSize == 0
+                then
+                    if progress then
+                        progress("indexando",#entries,0)
+                    end
+                    task.wait()
+                end
             end
         end
     end
 
-    if obj:IsA("Model") then
-        local primary = safeGet(obj,"PrimaryPart")
-        if primary then
-            out.PrimaryPartPath = pathOf(primary)
-        end
-    end
-
-    return out
+    return entries,idByInstance
 end
 
-local function collectAttributes(obj)
+local function collectProperties(instance)
     local out = {}
 
-    local ok, attrs = pcall(function()
-        return obj:GetAttributes()
-    end)
+    for _, property in ipairs(COMMON_PROPERTIES) do
+        addProperty(out,instance,property)
+    end
 
-    if ok and type(attrs) == "table" then
-        for key, value in pairs(attrs) do
-            out[tostring(key)] = ser(value)
+    for className, properties in pairs(CLASS_PROPERTIES) do
+        if instance:IsA(className) then
+            for _, property in ipairs(properties) do
+                addProperty(out,instance,property)
+            end
         end
     end
 
     return out
 end
 
-local function collectTags(obj)
+local function collectAttributes(instance)
+    if not CONFIG.ExportAttributes then
+        return {}
+    end
+
+    local out = {}
+    local ok, attributes = pcall(function()
+        return instance:GetAttributes()
+    end)
+
+    if ok and type(attributes) == "table" then
+        for key, value in pairs(attributes) do
+            out[tostring(key)] = serializeValue(value)
+        end
+    end
+
+    return out
+end
+
+local function collectTags(instance)
+    if not CONFIG.ExportTags then
+        return {}
+    end
+
     local ok, tags = pcall(function()
-        return CollectionService:GetTags(obj)
+        return CollectionService:GetTags(instance)
     end)
 
     if not ok or type(tags) ~= "table" then
@@ -321,119 +576,379 @@ local function collectTags(obj)
     for _, tag in ipairs(tags) do
         out[#out + 1] = tostring(tag)
     end
+
     return out
 end
 
-local function isLocalCharacterObject(obj)
-    local char = LocalPlayer and LocalPlayer.Character
-    return char and (obj == char or obj:IsDescendantOf(char))
+local function collectReferences(instance,idByInstance)
+    if not CONFIG.ExportReferences then
+        return {}
+    end
+
+    local refs = {}
+
+    for className, properties in pairs(REFERENCE_PROPERTIES) do
+        if instance:IsA(className) then
+            for _, property in ipairs(properties) do
+                local target = safeGet(instance,property)
+
+                if typeof(target) == "Instance" then
+                    local targetId = idByInstance[target]
+
+                    if targetId then
+                        refs[property] = {
+                            id=targetId
+                        }
+                    else
+                        local ok, fullName = pcall(function()
+                            return target:GetFullName()
+                        end)
+
+                        refs[property] = {
+                            externalPath=ok and fullName or target.Name
+                        }
+                    end
+                end
+            end
+        end
+    end
+
+    return refs
 end
 
-local ROOTS = {
-    {service="Workspace",object=workspace},
-    {service="Lighting",object=Lighting},
-    {service="ReplicatedStorage",object=ReplicatedStorage},
-    {service="ReplicatedFirst",object=ReplicatedFirst}
-}
-
-local function readLighting()
-    local props = {
+-------------------------------------------------
+-- SERVICE PROPERTIES
+-------------------------------------------------
+local SERVICE_PROPERTIES = {
+    Workspace={
+        "Gravity","FallenPartsDestroyHeight","GlobalWind",
+        "StreamingEnabled","StreamingMinRadius","StreamingTargetRadius"
+    },
+    Lighting={
         "Ambient","OutdoorAmbient","Brightness","ClockTime",
         "GeographicLatitude","ExposureCompensation",
         "EnvironmentDiffuseScale","EnvironmentSpecularScale",
         "FogColor","FogStart","FogEnd","GlobalShadows","ShadowSoftness"
-    }
+    },
+    SoundService={
+        "AmbientReverb","DistanceFactor","DopplerScale",
+        "RespectFilteringEnabled","RolloffScale"
+    },
+    MaterialService={
+        "Use2022Materials"
+    },
+    StarterGui={
+        "ResetPlayerGuiOnSpawn"
+    },
+}
+
+local SERVICE_OBJECTS = {
+    Workspace=Workspace,
+    Lighting=Lighting,
+    SoundService=SoundService,
+    MaterialService=MaterialService,
+    StarterGui=StarterGui,
+}
+
+local function collectServiceProperties()
+    local result = {}
+
+    for serviceName, properties in pairs(SERVICE_PROPERTIES) do
+        local service = SERVICE_OBJECTS[serviceName]
+
+        if service then
+            local values = {}
+
+            for _, property in ipairs(properties) do
+                addProperty(values,service,property)
+            end
+
+            result[serviceName] = values
+        end
+    end
+
+    return result
+end
+
+-------------------------------------------------
+-- COLLISION GROUPS
+-------------------------------------------------
+local function collectCollisionGroups()
+    if not CONFIG.ExportCollisionGroups then
+        return {}
+    end
+
+    local ok, groups = pcall(function()
+        return PhysicsService:GetRegisteredCollisionGroups()
+    end)
+
+    if not ok or type(groups) ~= "table" then
+        return {}
+    end
 
     local out = {}
 
-    for _, prop in ipairs(props) do
-        addProp(out,Lighting,prop)
+    for _, group in ipairs(groups) do
+        if type(group) == "table" then
+            out[#out + 1] = {
+                name=tostring(group.name or group.Name or ""),
+                mask=group.mask or group.Mask
+            }
+        end
     end
 
     return out
 end
 
 -------------------------------------------------
--- SCANNER
+-- TERRAIN
 -------------------------------------------------
-local function buildPayload(progress)
-    local payload = {
-        format="StudioLiteMapExportLua",
-        version=4,
-        placeId=finiteNumber(game.PlaceId),
-        gameId=finiteNumber(game.GameId),
-        placeVersion=finiteNumber(game.PlaceVersion),
-        exportedAt=finiteNumber(os.time()),
-        lighting=readLighting(),
-        objects={},
-        assets={},
-        stats={objects=0,assets=0,skipped=0},
-        notes={
-            "Only client-visible objects/properties are exported.",
-            "Server-only objects and hidden source are not accessible from the client.",
-            "Terrain voxel data is not included."
+local function exportTerrain(progress)
+    if not CONFIG.ExportTerrain then
+        return {
+            enabled=false,
+            reason="desativado"
         }
-    }
+    end
 
-    local assetSeen = {}
+    local terrain = Workspace:FindFirstChildOfClass("Terrain")
+
+    if not terrain then
+        return {
+            enabled=false,
+            reason="Terrain não encontrado"
+        }
+    end
+
+    local okExtents, extents = pcall(function()
+        return terrain.MaxExtents
+    end)
+
+    if not okExtents or not extents then
+        return {
+            enabled=false,
+            reason="MaxExtents indisponível"
+        }
+    end
+
+    local minCell = extents.Min
+    local maxCell = extents.Max
+
+    local sizeX = math.max(0,maxCell.X - minCell.X)
+    local sizeY = math.max(0,maxCell.Y - minCell.Y)
+    local sizeZ = math.max(0,maxCell.Z - minCell.Z)
+    local cellCount = sizeX * sizeY * sizeZ
+
+    if cellCount <= 0 then
+        return {
+            enabled=true,
+            empty=true,
+            resolution=CONFIG.TerrainResolution,
+            chunks={}
+        }
+    end
+
+    if cellCount > CONFIG.MaxTerrainCells then
+        return {
+            enabled=false,
+            skipped=true,
+            cellCount=cellCount,
+            reason="Terrain excede MaxTerrainCells ("..tostring(CONFIG.MaxTerrainCells)..")"
+        }
+    end
+
+    local chunks = {}
+    local chunkCells = math.max(1,CONFIG.TerrainChunkCells)
     local processed = 0
 
-    for _, root in ipairs(ROOTS) do
-        local descendants = root.object:GetDescendants()
+    for x = minCell.X, maxCell.X - 1, chunkCells do
+        local x2 = math.min(x + chunkCells,maxCell.X)
 
-        for _, obj in ipairs(descendants) do
-            processed += 1
+        for y = minCell.Y, maxCell.Y - 1, chunkCells do
+            local y2 = math.min(y + chunkCells,maxCell.Y)
 
-            if not isLocalCharacterObject(obj) then
-                table.insert(payload.objects,{
-                    class=tostring(obj.ClassName),
-                    name=tostring(obj.Name),
-                    path=pathOf(obj),
-                    parent=obj.Parent and pathOf(obj.Parent) or nil,
-                    root=root.service,
-                    properties=collectProperties(obj),
-                    attributes=collectAttributes(obj),
-                    tags=collectTags(obj)
-                })
+            for z = minCell.Z, maxCell.Z - 1, chunkCells do
+                local z2 = math.min(z + chunkCells,maxCell.Z)
 
-                payload.stats.objects += 1
+                local worldMin = Vector3.new(
+                    x * CONFIG.TerrainResolution,
+                    y * CONFIG.TerrainResolution,
+                    z * CONFIG.TerrainResolution
+                )
 
-                for className, props in pairs(ASSET_PROPS) do
-                    if obj:IsA(className) then
-                        for _, prop in ipairs(props) do
-                            local value = safeGet(obj,prop)
+                local worldMax = Vector3.new(
+                    x2 * CONFIG.TerrainResolution,
+                    y2 * CONFIG.TerrainResolution,
+                    z2 * CONFIG.TerrainResolution
+                )
 
-                            if typeof(value) == "string" and value ~= "" then
-                                local key = className.."|"..prop.."|"..value
+                local region = Region3.new(worldMin,worldMax):
+                    ExpandToGrid(CONFIG.TerrainResolution)
 
-                                if not assetSeen[key] then
-                                    assetSeen[key] = true
+                local okRead, materials, occupancy = pcall(function()
+                    return terrain:ReadVoxels(
+                        region,
+                        CONFIG.TerrainResolution
+                    )
+                end)
 
-                                    table.insert(payload.assets,{
-                                        class=className,
-                                        property=prop,
-                                        value=value,
-                                        firstPath=pathOf(obj)
-                                    })
+                if okRead
+                    and type(materials) == "table"
+                    and type(occupancy) == "table"
+                then
+                    local flatMaterials = {}
+                    local flatOccupancy = {}
+                    local count = 0
 
-                                    payload.stats.assets += 1
-                                end
+                    for ix = 1, #materials do
+                        local planeM = materials[ix]
+                        local planeO = occupancy[ix]
+
+                        for iy = 1, #planeM do
+                            local rowM = planeM[iy]
+                            local rowO = planeO[iy]
+
+                            for iz = 1, #rowM do
+                                count = count + 1
+
+                                local material = rowM[iz]
+                                flatMaterials[count] =
+                                    typeof(material) == "EnumItem"
+                                    and tostring(material)
+                                    or tostring(material)
+
+                                flatOccupancy[count] =
+                                    finiteNumber(rowO[iz] or 0)
                             end
                         end
                     end
-                end
-            else
-                payload.stats.skipped += 1
-            end
 
-            if processed % 200 == 0 then
-                if progress then
-                    progress(processed,payload.stats.objects,payload.stats.assets)
+                    chunks[#chunks + 1] = {
+                        minCell={x=x,y=y,z=z},
+                        size={
+                            x=x2-x,
+                            y=y2-y,
+                            z=z2-z
+                        },
+                        materials=flatMaterials,
+                        occupancy=flatOccupancy
+                    }
                 end
-                task.wait()
+
+                processed = processed + 1
+
+                if processed % 2 == 0 then
+                    if progress then
+                        progress("terrain",processed,0)
+                    end
+                    task.wait()
+                end
             end
         end
     end
+
+    return {
+        enabled=true,
+        resolution=CONFIG.TerrainResolution,
+        minCell={x=minCell.X,y=minCell.Y,z=minCell.Z},
+        maxCell={x=maxCell.X,y=maxCell.Y,z=maxCell.Z},
+        cellCount=cellCount,
+        chunks=chunks
+    }
+end
+
+-------------------------------------------------
+-- PAYLOAD
+-------------------------------------------------
+local function buildPayload(progress)
+    local entries,idByInstance =
+        collectInstances(progress)
+
+    local payload = {
+        format="StudioLiteMapExport",
+        version=5,
+        placeId=game.PlaceId,
+        gameId=game.GameId,
+        placeVersion=game.PlaceVersion,
+        exportedAt=os.time(),
+        serviceProperties=collectServiceProperties(),
+        collisionGroups=collectCollisionGroups(),
+        objects={},
+        terrain=nil,
+        stats={
+            indexed=#entries,
+            objects=0,
+            references=0,
+            propertyCount=0,
+            attributeCount=0,
+            tagCount=0,
+            fallbackNotes={}
+        },
+        limitations={
+            "Only data visible to the current client/environment can be exported.",
+            "Server-only source code and non-replicated objects are not present.",
+            "Asset IDs can be preserved, but unavailable/private assets may not render after import."
+        }
+    }
+
+    for index, entry in ipairs(entries) do
+        local instance = entry.instance
+        local parent = instance.Parent
+        local parentId = parent and idByInstance[parent] or nil
+
+        local properties = collectProperties(instance)
+        local attributes = collectAttributes(instance)
+        local tags = collectTags(instance)
+        local references = collectReferences(instance,idByInstance)
+
+        local record = {
+            id=entry.id,
+            root=entry.root,
+            parentId=parentId,
+            class=instance.ClassName,
+            name=instance.Name,
+            properties=properties,
+            attributes=attributes,
+            tags=tags,
+            references=references
+        }
+
+        payload.objects[#payload.objects + 1] = record
+        payload.stats.objects = payload.stats.objects + 1
+
+        for _ in pairs(properties) do
+            payload.stats.propertyCount =
+                payload.stats.propertyCount + 1
+        end
+
+        for _ in pairs(attributes) do
+            payload.stats.attributeCount =
+                payload.stats.attributeCount + 1
+        end
+
+        payload.stats.tagCount =
+            payload.stats.tagCount + #tags
+
+        for _ in pairs(references) do
+            payload.stats.references =
+                payload.stats.references + 1
+        end
+
+        if CONFIG.BatchSize > 0
+            and index % CONFIG.BatchSize == 0
+        then
+            if progress then
+                progress(
+                    "objetos",
+                    index,
+                    #entries
+                )
+            end
+            task.wait()
+        end
+    end
+
+    payload.terrain = exportTerrain(progress)
 
     return payload
 end
@@ -476,7 +991,7 @@ local function validIdentifier(key)
         and key:match("^[A-Za-z_][A-Za-z0-9_]*$") ~= nil
 end
 
-local function sortedNonArrayKeys(tbl, arrayLength)
+local function sortedNonArrayKeys(tbl,arrayLength)
     local keys = {}
 
     for key in pairs(tbl) do
@@ -492,7 +1007,8 @@ local function sortedNonArrayKeys(tbl, arrayLength)
     end
 
     table.sort(keys,function(a,b)
-        local ta, tb = type(a), type(b)
+        local ta = type(a)
+        local tb = type(b)
 
         if ta == tb then
             return tostring(a) < tostring(b)
@@ -504,7 +1020,7 @@ local function sortedNonArrayKeys(tbl, arrayLength)
     return keys
 end
 
-local function encodeLua(value, output, indent, seen)
+local function encodeLua(value,output,indent,seen)
     local t = type(value)
 
     if t == "nil" then
@@ -525,7 +1041,8 @@ local function encodeLua(value, output, indent, seen)
     end
 
     if seen[value] then
-        output[#output + 1] = quoteLuaString("<circular-reference>")
+        output[#output + 1] =
+            quoteLuaString("<circular-reference>")
         return
     end
 
@@ -534,7 +1051,8 @@ local function encodeLua(value, output, indent, seen)
     local pad = string.rep("    ",indent)
     local childPad = string.rep("    ",indent + 1)
     local arrayLength = #value
-    local extraKeys = sortedNonArrayKeys(value,arrayLength)
+    local extraKeys =
+        sortedNonArrayKeys(value,arrayLength)
 
     output[#output + 1] = "{\n"
 
@@ -568,9 +1086,9 @@ end
 
 local function payloadToLua(payload)
     local output = {
-        "-- Studio Lite Map Export\n",
-        "-- Generated by Map Exporter Mobile V4\n",
-        "-- Usage: local data = loadstring(readfile(FILE_PATH))()\n\n",
+        "-- Studio Lite Map Export V5\n",
+        "-- Generated by StudioLite Map Exporter Mobile V5\n",
+        "-- Data-only export. The importer parses this table without executing game code.\n\n",
         "return "
     }
 
@@ -581,7 +1099,7 @@ local function payloadToLua(payload)
 end
 
 -------------------------------------------------
--- ARQUIVO / CAMINHOS
+-- SALVAMENTO
 -------------------------------------------------
 local function normalizePath(path)
     path = tostring(path):gsub("\\","/")
@@ -593,8 +1111,25 @@ local function parentPath(path)
     return path:match("^(.*)/[^/]+$")
 end
 
+local function getWorkspacePath()
+    if type(API.getworkspace) ~= "function" then
+        return nil
+    end
+
+    local ok, value = pcall(API.getworkspace)
+
+    if ok and type(value) == "string" and value ~= "" then
+        return normalizePath(value):gsub("/+$","")
+    end
+
+    return nil
+end
+
 local function ensureFolder(path)
-    if not API.makefolder or type(path) ~= "string" or path == "" then
+    if type(API.makefolder) ~= "function"
+        or type(path) ~= "string"
+        or path == ""
+    then
         return
     end
 
@@ -604,7 +1139,11 @@ local function ensureFolder(path)
         local current = ""
 
         for part in path:gmatch("[^/]+") do
-            current = current == "" and part or (current.."/"..part)
+            current =
+                current == ""
+                and part
+                or (current.."/"..part)
+
             pcall(API.makefolder,current)
         end
     end
@@ -626,10 +1165,10 @@ local function addCandidate(list,seen,path,label)
     end
 end
 
-local function buildCandidates(fileName)
+local function buildSaveCandidates(fileName)
     local list = {}
     local seen = {}
-    local folder = "StudioLiteExports"
+    local folder = CONFIG.SaveFolder
 
     addCandidate(
         list,seen,
@@ -645,26 +1184,14 @@ local function buildCandidates(fileName)
 
     addCandidate(
         list,seen,
-        "/storage/emulated/0/Download/"..fileName,
-        "Download"
-    )
-
-    addCandidate(
-        list,seen,
-        "/sdcard/Download/"..fileName,
-        "Download"
-    )
-
-    addCandidate(
-        list,seen,
         "/storage/emulated/0/Delta/Workspace/"..folder.."/"..fileName,
         "Delta Workspace"
     )
 
     addCandidate(
         list,seen,
-        "/storage/emulated/0/Delta/Workspace/"..fileName,
-        "Delta Workspace"
+        "/storage/emulated/0/Delta/Workspace/Studio Lite/"..folder.."/"..fileName,
+        "Studio Lite"
     )
 
     local ws = getWorkspacePath()
@@ -673,12 +1200,6 @@ local function buildCandidates(fileName)
         addCandidate(
             list,seen,
             ws.."/"..folder.."/"..fileName,
-            "Workspace"
-        )
-
-        addCandidate(
-            list,seen,
-            ws.."/"..fileName,
             "Workspace"
         )
     end
@@ -699,7 +1220,7 @@ local function buildCandidates(fileName)
 end
 
 local function verifyWrite(path,contents)
-    if API.isfile then
+    if type(API.isfile) == "function" then
         local ok, exists = pcall(API.isfile,path)
 
         if not ok or exists ~= true then
@@ -707,27 +1228,23 @@ local function verifyWrite(path,contents)
         end
     end
 
-    if API.readfile then
+    if type(API.readfile) == "function" then
         local ok, data = pcall(API.readfile,path)
 
         if not ok then
-            return false,"readfile não conseguiu reler o arquivo"
+            return false,"readfile não conseguiu reler"
         end
 
         if type(data) ~= "string" then
-            return false,"readfile retornou conteúdo inválido"
+            return false,"readfile retornou dado inválido"
         end
 
         if #data ~= #contents then
             return false,
-                "tamanho salvo diferente: "
+                "tamanho diferente: "
                 ..tostring(#data)
                 .." / "
                 ..tostring(#contents)
-        end
-
-        if data ~= contents then
-            return false,"conteúdo relido diferente do conteúdo exportado"
         end
     end
 
@@ -735,119 +1252,148 @@ local function verifyWrite(path,contents)
 end
 
 local function savePayload(payload)
-    local okSerialize, luaSource = pcall(payloadToLua,payload)
+    local okSerialize, source =
+        pcall(payloadToLua,payload)
 
     if not okSerialize then
         return false,{
-            method="error",
-            message="Falha ao gerar script Lua: "..tostring(luaSource),
-            bytes=0
+            message="Falha ao gerar arquivo Lua: "..tostring(source)
         }
     end
 
-    local stamp = os.date("!%Y%m%d_%H%M%S")
-    local fileName = ("StudioLite_Map_%s_%s.lua")
-        :format(tostring(game.PlaceId),stamp)
+    local stamp =
+        os.date("!%Y%m%d_%H%M%S")
+
+    local fileName =
+        ("StudioLite_Map_%s_%s.lua"):
+        format(
+            tostring(game.PlaceId),
+            stamp
+        )
 
     local errors = {}
 
-    if API.writefile then
-        for _, candidate in ipairs(buildCandidates(fileName)) do
-            local path = candidate.path
-            local parent = parentPath(path)
+    if type(API.writefile) == "function" then
+        for _, candidate
+            in ipairs(
+                buildSaveCandidates(fileName)
+            )
+        do
+            local parent =
+                parentPath(candidate.path)
 
             if parent then
                 ensureFolder(parent)
             end
 
-            local okWrite, writeErr = pcall(
-                API.writefile,
-                path,
-                luaSource
-            )
+            local okWrite, err =
+                pcall(
+                    API.writefile,
+                    candidate.path,
+                    source
+                )
 
             if okWrite then
-                local verified, verifyErr = verifyWrite(path,luaSource)
+                local verified, verifyError =
+                    verifyWrite(
+                        candidate.path,
+                        source
+                    )
 
                 if verified then
                     return true,{
                         method="file",
-                        path=path,
+                        path=candidate.path,
                         label=candidate.label,
-                        bytes=#luaSource,
-                        verified=(API.isfile ~= nil or API.readfile ~= nil)
+                        bytes=#source,
+                        verified=true
                     }
                 end
 
                 errors[#errors + 1] =
-                    path.." -> "..tostring(verifyErr)
+                    candidate.path
+                    .." -> "
+                    ..tostring(verifyError)
             else
                 errors[#errors + 1] =
-                    path.." -> "..tostring(writeErr)
+                    candidate.path
+                    .." -> "
+                    ..tostring(err)
             end
         end
     else
-        errors[#errors + 1] = "writefile indisponível"
+        errors[#errors + 1] =
+            "writefile indisponível"
     end
 
-    if API.setclipboard then
-        local okClip, clipErr = pcall(API.setclipboard,luaSource)
+    if type(API.setclipboard) == "function" then
+        local okClip, errClip =
+            pcall(
+                API.setclipboard,
+                source
+            )
 
         if okClip then
             return true,{
                 method="clipboard",
-                bytes=#luaSource,
-                writeErrors=errors
+                bytes=#source,
+                errors=errors
             }
         end
 
         errors[#errors + 1] =
-            "setclipboard -> "..tostring(clipErr)
+            "clipboard -> "
+            ..tostring(errClip)
     end
 
-    print("=== StudioLite Map Export LUA ===")
-    print(luaSource)
+    print(source)
 
     return true,{
         method="console",
-        bytes=#luaSource,
-        writeErrors=errors
+        bytes=#source,
+        errors=errors
     }
 end
 
 -------------------------------------------------
 -- UI
 -------------------------------------------------
-local parent
+local guiParent
 
 do
-    if API.gethui then
-        local ok, result = pcall(API.gethui)
-        if ok and result then
-            parent = result
+    if type(API.gethui) == "function" then
+        local ok, value = pcall(API.gethui)
+        if ok and value then
+            guiParent = value
         end
     end
 
-    if not parent then
+    if not guiParent then
         local ok, coreGui = pcall(function()
             return game:GetService("CoreGui")
         end)
 
         if ok then
-            parent = coreGui
+            guiParent = coreGui
         end
     end
 
-    if not parent and LocalPlayer then
-        parent = LocalPlayer:WaitForChild("PlayerGui")
+    if not guiParent and LocalPlayer then
+        guiParent =
+            LocalPlayer:WaitForChild("PlayerGui")
     end
 end
 
-if not parent then
-    error("Map Exporter: não foi possível criar a interface.")
+if not guiParent then
+    error("StudioLite Exporter: interface indisponível.")
 end
 
-local old = parent:FindFirstChild("StudioLiteMapExporter")
+local old =
+    guiParent:
+    FindFirstChild(
+        "StudioLiteMapExporter"
+    )
+
 if old then
     old:Destroy()
 end
@@ -856,50 +1402,49 @@ local gui = Instance.new("ScreenGui")
 gui.Name = "StudioLiteMapExporter"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = false
-gui.Parent = parent
+gui.Parent = guiParent
 
-local FRAME_W = 350
-local FRAME_H = 450
+local WIDTH = 360
+local HEIGHT = 470
 
 local frame = Instance.new("Frame")
-frame.Name = "Main"
-frame.Size = UDim2.fromOffset(FRAME_W,FRAME_H)
-frame.Position = UDim2.new(
-    0.5,
-    -FRAME_W / 2,
-    0.5,
-    -FRAME_H / 2
-)
-frame.BackgroundColor3 = Color3.fromRGB(20,22,28)
+frame.Size = UDim2.fromOffset(WIDTH,HEIGHT)
+frame.Position =
+    UDim2.new(
+        0.5,-WIDTH/2,
+        0.5,-HEIGHT/2
+    )
+frame.BackgroundColor3 =
+    Color3.fromRGB(20,22,28)
 frame.BorderSizePixel = 0
 frame.Parent = gui
 
 Instance.new("UICorner",frame).CornerRadius =
     UDim.new(0,12)
 
-local stroke = Instance.new("UIStroke")
-stroke.Color = Color3.fromRGB(65,70,85)
-stroke.Thickness = 1
-stroke.Parent = frame
+local border = Instance.new("UIStroke")
+border.Color = Color3.fromRGB(65,70,85)
+border.Thickness = 1
+border.Parent = frame
 
-local top = Instance.new("TextLabel")
-top.Size = UDim2.new(1,-48,0,48)
-top.Position = UDim2.fromOffset(14,0)
-top.BackgroundTransparency = 1
-top.Text = "MAP EXPORTER MOBILE V4"
-top.TextColor3 = Color3.fromRGB(245,245,250)
-top.TextSize = 18
-top.Font = Enum.Font.GothamBold
-top.TextXAlignment = Enum.TextXAlignment.Left
-top.Active = true
-top.Parent = frame
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1,-52,0,48)
+title.Position = UDim2.fromOffset(14,0)
+title.BackgroundTransparency = 1
+title.Text = "MAP EXPORTER MOBILE V5"
+title.TextColor3 = Color3.fromRGB(245,245,250)
+title.TextSize = 18
+title.Font = Enum.Font.GothamBold
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Active = true
+title.Parent = frame
 
 local close = Instance.new("TextButton")
 close.Size = UDim2.fromOffset(38,38)
 close.Position = UDim2.new(1,-43,0,5)
 close.BackgroundColor3 = Color3.fromRGB(45,48,58)
 close.Text = "×"
-close.TextColor3 = Color3.fromRGB(240,240,245)
+close.TextColor3 = Color3.fromRGB(245,245,250)
 close.TextSize = 24
 close.Font = Enum.Font.GothamBold
 close.Parent = frame
@@ -912,7 +1457,7 @@ close.MouseButton1Click:Connect(function()
 end)
 
 local info = Instance.new("TextLabel")
-info.Size = UDim2.new(1,-28,0,170)
+info.Size = UDim2.new(1,-28,0,190)
 info.Position = UDim2.fromOffset(14,54)
 info.BackgroundColor3 = Color3.fromRGB(29,32,40)
 info.TextColor3 = Color3.fromRGB(205,210,220)
@@ -921,160 +1466,157 @@ info.Font = Enum.Font.Code
 info.TextXAlignment = Enum.TextXAlignment.Left
 info.TextYAlignment = Enum.TextYAlignment.Top
 info.TextWrapped = true
+info.Text = table.concat({
+    "Formato: V5 / IDs internos",
+    "Objetos: 0",
+    "Referências: 0",
+    "Propriedades: 0",
+    "Terrain: aguardando",
+    "Status: pronto",
+},"\n")
 info.Parent = frame
 
 Instance.new("UICorner",info).CornerRadius =
     UDim.new(0,9)
 
-local function apiMark(name)
-    return API[name] and "SIM" or "NÃO"
-end
+local scanBtn = Instance.new("TextButton")
+scanBtn.Size = UDim2.new(1,-28,0,48)
+scanBtn.Position = UDim2.fromOffset(14,256)
+scanBtn.BackgroundColor3 = Color3.fromRGB(56,105,245)
+scanBtn.TextColor3 = Color3.fromRGB(255,255,255)
+scanBtn.Text = "ESCANEAR MAPA V5"
+scanBtn.TextSize = 15
+scanBtn.Font = Enum.Font.GothamBold
+scanBtn.Parent = frame
 
-local function apiReport()
-    local ws = getWorkspacePath()
+Instance.new("UICorner",scanBtn).CornerRadius =
+    UDim.new(0,9)
 
-    return table.concat({
-        "Formato: LUA",
-        "writefile: "..apiMark("writefile"),
-        "readfile: "..apiMark("readfile"),
-        "isfile: "..apiMark("isfile"),
-        "makefolder: "..apiMark("makefolder"),
-        "setclipboard: "..apiMark("setclipboard"),
-        "getworkspace: "..apiMark("getworkspace"),
-        "workspace: "..(ws or "<não exposto>")
-    },"\n")
-end
+local exportBtn = Instance.new("TextButton")
+exportBtn.Size = UDim2.new(1,-28,0,48)
+exportBtn.Position = UDim2.fromOffset(14,314)
+exportBtn.BackgroundColor3 = Color3.fromRGB(46,160,90)
+exportBtn.TextColor3 = Color3.fromRGB(255,255,255)
+exportBtn.Text = "EXPORTAR MAPA V5"
+exportBtn.TextSize = 15
+exportBtn.Font = Enum.Font.GothamBold
+exportBtn.Parent = frame
 
-local function infoText(objects,assets,statusText)
-    return (
-        "Objetos: %d\n"
-        .."Assets: %d\n"
-        .."%s\n"
-        .."Status: %s"
-    ):format(
-        objects or 0,
-        assets or 0,
-        apiReport(),
-        statusText or "pronto"
-    )
-end
-
-info.Text = infoText(0,0,"pronto")
-
-local function createButton(text,y,color)
-    local button = Instance.new("TextButton")
-
-    button.Size = UDim2.new(1,-28,0,46)
-    button.Position = UDim2.fromOffset(14,y)
-    button.BackgroundColor3 = color
-    button.TextColor3 = Color3.fromRGB(255,255,255)
-    button.Text = text
-    button.TextSize = 15
-    button.Font = Enum.Font.GothamBold
-    button.Parent = frame
-
-    Instance.new("UICorner",button).CornerRadius =
-        UDim.new(0,9)
-
-    return button
-end
-
-local scanBtn = createButton(
-    "ESCANEAR MAPA",
-    234,
-    Color3.fromRGB(56,105,245)
-)
-
-local exportBtn = createButton(
-    "EXPORTAR COMO LUA",
-    288,
-    Color3.fromRGB(46,160,90)
-)
+Instance.new("UICorner",exportBtn).CornerRadius =
+    UDim.new(0,9)
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1,-28,0,104)
-status.Position = UDim2.fromOffset(14,342)
+status.Size = UDim2.new(1,-28,0,92)
+status.Position = UDim2.fromOffset(14,372)
 status.BackgroundTransparency = 1
-status.TextWrapped = true
 status.TextColor3 = Color3.fromRGB(155,160,175)
 status.TextSize = 12
 status.Font = Enum.Font.Gotham
 status.TextXAlignment = Enum.TextXAlignment.Left
 status.TextYAlignment = Enum.TextYAlignment.Top
-status.Text = "Pronto. O arquivo gerado será .lua."
+status.TextWrapped = true
+status.Text =
+    "Processamento em lotes ativo para reduzir travamentos."
 status.Parent = frame
 
--------------------------------------------------
--- ESTADO
--------------------------------------------------
 local busy = false
 local lastPayload = nil
 
-local function setStatus(text)
-    status.Text = tostring(text)
+local function setButtonsEnabled(enabled)
+    scanBtn.Active = enabled
+    exportBtn.Active = enabled
+    scanBtn.AutoButtonColor = enabled
+    exportBtn.AutoButtonColor = enabled
 end
 
-local function refreshStats(payload,label)
-    local objects =
+local function refreshInfo(payload,state)
+    local stats =
         payload
         and payload.stats
-        and payload.stats.objects
-        or 0
+        or {}
 
-    local assets =
-        payload
-        and payload.stats
-        and payload.stats.assets
-        or 0
+    local terrainText = "aguardando"
 
-    info.Text = infoText(objects,assets,label)
+    if payload and payload.terrain then
+        if payload.terrain.enabled then
+            terrainText =
+                payload.terrain.empty
+                and "vazio"
+                or (
+                    tostring(
+                        #(payload.terrain.chunks or {})
+                    )
+                    .." chunks"
+                )
+        else
+            terrainText =
+                "não exportado"
+        end
+    end
+
+    info.Text = table.concat({
+        "Formato: V5 / IDs internos",
+        "Objetos: "..tostring(stats.objects or 0),
+        "Referências: "..tostring(stats.references or 0),
+        "Propriedades: "..tostring(stats.propertyCount or 0),
+        "Atributos: "..tostring(stats.attributeCount or 0),
+        "Tags: "..tostring(stats.tagCount or 0),
+        "Terrain: "..terrainText,
+        "Status: "..tostring(state or "pronto"),
+    },"\n")
 end
 
--------------------------------------------------
--- SCAN
--------------------------------------------------
 local function runScan()
     if busy then
         return false
     end
 
     busy = true
+    setButtonsEnabled(false)
     scanBtn.Text = "ESCANEANDO..."
-    exportBtn.Active = false
-    exportBtn.AutoButtonColor = false
+    status.Text =
+        "Indexando objetos e relações..."
 
-    setStatus("Lendo objetos visíveis...")
+    local ok, result =
+        pcall(function()
+            return buildPayload(
+                function(stage,current,total)
+                    if stage == "indexando" then
+                        status.Text =
+                            "Indexando objetos: "
+                            ..tostring(current)
+                    elseif stage == "objetos" then
+                        status.Text =
+                            "Serializando: "
+                            ..tostring(current)
+                            .." / "
+                            ..tostring(total)
+                    elseif stage == "terrain" then
+                        status.Text =
+                            "Lendo Terrain: chunk "
+                            ..tostring(current)
+                    end
 
-    local ok, result = pcall(function()
-        return buildPayload(function(processed,objects,assets)
-            info.Text = (
-                "Objetos: %d\n"
-                .."Assets: %d\n"
-                .."Analisando: %d\n"
-                .."%s\n"
-                .."Status: escaneando"
-            ):format(
-                objects,
-                assets,
-                processed,
-                apiReport()
+                    task.wait()
+                end
             )
         end)
-    end)
 
     if ok then
         lastPayload = result
-        refreshStats(lastPayload,"escaneado")
-        setStatus("Scanner concluído.")
+        refreshInfo(lastPayload,"escaneado")
+        status.Text =
+            "Scanner concluído. Pronto para exportar."
     else
         lastPayload = nil
-        refreshStats(nil,"erro")
-        setStatus("Erro no scanner: "..tostring(result))
+        refreshInfo(nil,"erro")
+        status.Text =
+            "Erro no scanner:\n"
+            ..tostring(result)
     end
 
-    scanBtn.Text = "ESCANEAR MAPA"
-    exportBtn.Active = true
-    exportBtn.AutoButtonColor = true
+    scanBtn.Text = "ESCANEAR MAPA V5"
+    setButtonsEnabled(true)
     busy = false
 
     return ok
@@ -1084,9 +1626,6 @@ scanBtn.MouseButton1Click:Connect(function()
     task.spawn(runScan)
 end)
 
--------------------------------------------------
--- EXPORTAÇÃO
--------------------------------------------------
 exportBtn.MouseButton1Click:Connect(function()
     if busy then
         return
@@ -1094,127 +1633,66 @@ exportBtn.MouseButton1Click:Connect(function()
 
     task.spawn(function()
         if not lastPayload then
-            local scanOk = runScan()
+            local ok = runScan()
 
-            if not scanOk or not lastPayload then
+            if not ok or not lastPayload then
                 return
             end
         end
 
         busy = true
-        scanBtn.Active = false
-        exportBtn.Text = "GERANDO LUA..."
+        setButtonsEnabled(false)
+        exportBtn.Text = "SALVANDO..."
+        status.Text =
+            "Gerando arquivo Lua V5..."
 
-        setStatus(
-            "Serializando mapa em Lua e testando locais de gravação..."
-        )
+        local okCall, saveOk, result =
+            pcall(function()
+                local ok, value =
+                    savePayload(lastPayload)
 
-        local callOk, saveOk, result = pcall(function()
-            local ok, saveResult = savePayload(lastPayload)
-            return ok,saveResult
-        end)
+                return ok,value
+            end)
 
-        if not callOk then
-            setStatus(
-                "ERRO inesperado:\n"..tostring(saveOk)
-            )
-
-            refreshStats(
-                lastPayload,
-                "erro ao exportar"
-            )
-
-        elseif saveOk and type(result) == "table" then
+        if not okCall then
+            status.Text =
+                "Erro inesperado:\n"
+                ..tostring(saveOk)
+            refreshInfo(lastPayload,"erro")
+        elseif saveOk
+            and type(result) == "table"
+        then
             if result.method == "file" then
-                local state =
-                    result.verified
-                    and "verificado"
-                    or "gravado"
-
-                setStatus(
-                    (
-                        "SUCESSO!\n"
-                        .."%s\n"
-                        .."%s\n"
-                        .."%d bytes (%s)"
-                    ):format(
-                        tostring(result.label or "Arquivo"),
-                        tostring(result.path),
-                        tonumber(result.bytes) or 0,
-                        state
-                    )
-                )
-
-                refreshStats(
-                    lastPayload,
-                    "exportado .lua"
-                )
-
+                status.Text =
+                    "SUCESSO\n"
+                    ..tostring(result.path)
+                    .."\n"
+                    ..tostring(result.bytes)
+                    .." bytes"
+                refreshInfo(lastPayload,"exportado")
             elseif result.method == "clipboard" then
-                setStatus(
-                    (
-                        "Script Lua copiado para a área de transferência.\n"
-                        .."%d bytes.\n"
-                        .."A gravação em arquivo foi recusada pelo ambiente."
-                    ):format(
-                        tonumber(result.bytes) or 0
-                    )
-                )
-
-                refreshStats(
-                    lastPayload,
-                    "clipboard"
-                )
-
+                status.Text =
+                    "Arquivo não pôde ser gravado. "
+                    .."Conteúdo copiado para clipboard."
+                refreshInfo(lastPayload,"clipboard")
             else
-                local lastError = ""
-
-                if result.writeErrors
-                    and #result.writeErrors > 0
-                then
-                    lastError =
-                        "\nÚltimo erro: "
-                        ..tostring(
-                            result.writeErrors[
-                                #result.writeErrors
-                            ]
-                        )
-                end
-
-                setStatus(
-                    (
-                        "Script Lua enviado ao console (%d bytes).%s"
-                    ):format(
-                        tonumber(result.bytes) or 0,
-                        lastError
-                    )
-                )
-
-                refreshStats(
-                    lastPayload,
-                    "console"
-                )
+                status.Text =
+                    "Conteúdo enviado ao console."
+                refreshInfo(lastPayload,"console")
             end
-
         else
-            local message =
-                type(result) == "table"
-                and result.message
-                or tostring(result)
-
-            setStatus(
-                "ERRO ao exportar:\n"
-                ..tostring(message)
-            )
-
-            refreshStats(
-                lastPayload,
-                "erro ao exportar"
-            )
+            status.Text =
+                "Falha ao exportar:\n"
+                ..tostring(
+                    type(result) == "table"
+                    and result.message
+                    or result
+                )
+            refreshInfo(lastPayload,"erro")
         end
 
-        exportBtn.Text = "EXPORTAR COMO LUA"
-        scanBtn.Active = true
+        exportBtn.Text = "EXPORTAR MAPA V5"
+        setButtonsEnabled(true)
         busy = false
     end)
 end)
@@ -1227,7 +1705,7 @@ local dragStart = nil
 local startPos = nil
 local activeInput = nil
 
-top.InputBegan:Connect(function(input)
+title.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1
         or input.UserInputType == Enum.UserInputType.Touch
     then
@@ -1239,10 +1717,7 @@ top.InputBegan:Connect(function(input)
 end)
 
 UIS.InputChanged:Connect(function(input)
-    if not dragging
-        or not dragStart
-        or not startPos
-    then
+    if not dragging or not dragStart or not startPos then
         return
     end
 
@@ -1260,12 +1735,13 @@ UIS.InputChanged:Connect(function(input)
 
     local delta = input.Position - dragStart
 
-    frame.Position = UDim2.new(
-        startPos.X.Scale,
-        startPos.X.Offset + delta.X,
-        startPos.Y.Scale,
-        startPos.Y.Offset + delta.Y
-    )
+    frame.Position =
+        UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
 end)
 
 UIS.InputEnded:Connect(function(input)
@@ -1277,4 +1753,4 @@ UIS.InputEnded:Connect(function(input)
     end
 end)
 
-print("[Studio Lite Map Exporter V4 LUA] carregado.")
+log("Map Exporter Mobile V5 carregado.")

@@ -1,5 +1,5 @@
 --[[
-    STUDIO LIFE MAP GENERATOR PRO V3.0.1
+    STUDIO LIFE MAP GENERATOR PRO V3.0.2
     Gerador procedural de mapas em Luau.
     Painel mobile/PC, presets, biomas, terrain opcional, natureza, cidades,
     iluminação, seed, progresso, pausa/cancelamento, undo/redo e validação.
@@ -22,7 +22,7 @@ end
 local Terrain = Workspace.Terrain
 
 local CONFIG = {
-    Version = "3.0.1",
+    Version = "3.0.2",
     FolderName = "StudioLife_MapGenerator_PRO",
     Seed = math.random(1, 999999),
     Size = 320,
@@ -1021,7 +1021,7 @@ local function road(size, cf, neon)
         Size = size,
         CFrame = cf,
         Color = neon and Color3.fromRGB(255, 220, 66) or Color3.fromRGB(43, 45, 50),
-        Material = neon and Enum.Material.Neon or Enum.Material.Asphalt,
+        Material = neon and Enum.Material.Neon or Enum.Material.Pavement,
         CanCollide = not neon,
         Parent = getSub("Roads")
     })
@@ -1667,7 +1667,7 @@ local function raceMap()
             Size = Vector3.new(18,0.65,length + 2),
             CFrame = CFrame.lookAt(Vector3.new(x,0.32,z), Vector3.new(nx,0.32,nz)),
             Color = Color3.fromRGB(45,47,52),
-            Material = Enum.Material.Asphalt,
+            Material = Enum.Material.Pavement,
             Parent = parent
         })
     end
@@ -2065,8 +2065,8 @@ local function buildPreview(name)
     local localRng = Random.new(CONFIG.Seed + #name * 31)
 
     if name == "Cidade" or name == "Cyberpunk" then
-        previewPart(Vector3.new(8,0.4,48), CFrame.new(0,0.2,0), Color3.fromRGB(45,45,50), Enum.Material.Asphalt)
-        previewPart(Vector3.new(48,0.4,8), CFrame.new(0,0.22,0), Color3.fromRGB(45,45,50), Enum.Material.Asphalt)
+        previewPart(Vector3.new(8,0.4,48), CFrame.new(0,0.2,0), Color3.fromRGB(45,45,50), Enum.Material.Pavement)
+        previewPart(Vector3.new(48,0.4,8), CFrame.new(0,0.22,0), Color3.fromRGB(45,45,50), Enum.Material.Pavement)
         for i = 1, 10 do
             local x = (i % 2 == 0) and localRng:NextNumber(8,20) or localRng:NextNumber(-20,-8)
             local z = localRng:NextNumber(-20,20)
@@ -2128,7 +2128,9 @@ if not guiParent then
 end
 
 local oldGui = guiParent:FindFirstChild("StudioLifeMapGeneratorPRO")
-if oldGui then oldGui:Destroy() end
+if oldGui then
+    pcall(function() oldGui:Destroy() end)
+end
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "StudioLifeMapGeneratorPRO"
@@ -2177,7 +2179,7 @@ local title = Instance.new("TextLabel")
 title.Position = UDim2.fromOffset(15,7)
 title.Size = UDim2.new(1,-100,0,27)
 title.BackgroundTransparency = 1
-title.Text = "MAP GENERATOR PRO V3.0.1"
+title.Text = "MAP GENERATOR PRO V3.0.2"
 title.TextColor3 = COLORS.text
 title.Font = Enum.Font.GothamBold
 title.TextSize = 17
@@ -2755,7 +2757,6 @@ logsBox.Font = Enum.Font.Code
 logsBox.TextWrapped = false
 logsBox.ClearTextOnFocus = false
 logsBox.MultiLine = true
-logsBox.TextEditable = false
 logsBox.TextXAlignment = Enum.TextXAlignment.Left
 logsBox.TextYAlignment = Enum.TextYAlignment.Top
 logsBox.Parent = logsTab
@@ -2864,4 +2865,4 @@ _G.StudioLifeMapGeneratorPRO = {
     Version = CONFIG.Version
 }
 
-print("[MapGen] Studio Life Map Generator PRO V3.0.1 carregado.")
+print("[MapGen] Studio Life Map Generator PRO V3.0.2 carregado.")

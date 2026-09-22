@@ -55,6 +55,10 @@ local fpsCount = 0
 local dropCount = 0
 local modifiedProperties = 0
 
+-- Forward declarations usadas pelo analisador antes da construcao da interface.
+local stageNames
+local setStatus
+
 local original = setmetatable({}, {__mode = "k"})
 local connections = {}
 local originalQuality = nil
@@ -375,7 +379,7 @@ local function analyzeMap(showStatus)
     return result
 end
 
-local stageNames = {
+stageNames = {
     [0] = "NORMAL",
     [1] = "BALANCEADO",
     [2] = "DESEMPENHO",
@@ -387,7 +391,7 @@ local stageLabel
 local autoButton
 local capButton
 
-local function setStatus(text)
+setStatus = function(text)
     if statusLabel and statusLabel.Parent then
         statusLabel.Text = tostring(text)
     end

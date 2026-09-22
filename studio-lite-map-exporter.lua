@@ -1,9 +1,8 @@
--- Studio Lite Map Exporter Mobile — Delta/Android
+-- Studio Lite Map Exporter Mobile V4 — Lua Export
 -- Exporta somente objetos/propriedades visíveis ao cliente.
--- Tenta salvar em Download, Workspace exposto pelo executor ou sandbox relativo.
+-- NÃO usa JSONEncode: gera um arquivo .lua ASCII-safe e evita "Can't convert to JSON".
 
 local Players = game:GetService("Players")
-local HttpService = game:GetService("HttpService")
 local CollectionService = game:GetService("CollectionService")
 local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -13,9 +12,9 @@ local UIS = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 
 -------------------------------------------------
--- RESOLUÇÃO / DETECÇÃO DE APIs
+-- APIs DO AMBIENTE
 -------------------------------------------------
-local function globalValue(name)
+local function getGlobal(name)
     local ok, env
 
     if type(getgenv) == "function" then
@@ -39,16 +38,17 @@ local function globalValue(name)
     return nil
 end
 
-local API = {}
 local API_NAMES = {
-    "writefile","readfile","isfile","delfile",
-    "makefolder","isfolder","listfiles",
-    "setclipboard","getclipboard","getworkspace"
+    "writefile","readfile","isfile","makefolder",
+    "isfolder","listfiles","setclipboard",
+    "getclipboard","getworkspace","gethui"
 }
+
+local API = {}
 
 local function detectAPIs()
     for _, name in ipairs(API_NAMES) do
-        local fn = globalValue(name)
+        local fn = getGlobal(name)
         API[name] = type(fn) == "function" and fn or nil
     end
 end
@@ -60,19 +60,22 @@ local function getWorkspacePath()
         return nil
     end
 
-    local ok, ws = pcall(API.getworkspace)
-    if ok and type(ws) == "string" and ws ~= "" then
-        return ws:gsub("\\", "/"):gsub("/+$", "")
+    local ok, path = pcall(API.getworkspace)
+
+    if ok and type(path) == "string" and path ~= "" then
+        path = path:gsub("\\", "/")
+        path = path:gsub("/+$", "")
+        return path
     end
 
     return nil
 end
 
 -------------------------------------------------
--- SERIALIZAÇÃO
+-- SERIALIZAÇÃO DE PROPRIEDADES ROBLOX
 -------------------------------------------------
-local function packNumber(n)
-    if n ~= n or n == math.huge or n == -math.huge then
+local function finiteNumber(n)
+    if type(n) ~= "number" or n ~= n or n == math.huge or n == -math.huge then
         return 0
     end
     return n
@@ -81,42 +84,74 @@ end
 local function ser(v)
     local t = typeof(v)
 
-    if t == "nil" then return nil end
-    if t == "string" or t == "boolean" then return v end
-    if t == "number" then return packNumber(v) end
-    if t == "Vector2" then return {__type="Vector2",x=v.X,y=v.Y} end
-    if t == "Vector3" then return {__type="Vector3",x=v.X,y=v.Y,z=v.Z} end
-    if t == "Color3" then return {__type="Color3",r=v.R,g=v.G,b=v.B} end
-    if t == "CFrame" then return {__type="CFrame",values={v:GetComponents()}} end
-    if t == "UDim" then return {__type="UDim",scale=v.Scale,offset=v.Offset} end
-    if t == "UDim2" then
+    if t == "nil" then
+        return nil
+    elseif t == "string" or t == "boolean" then
+        return v
+    elseif t == "number" then
+        return finiteNumber(v)
+    elseif t == "Vector2" then
+        return {__type="Vector2",x=finiteNumber(v.X),y=finiteNumber(v.Y)}
+    elseif t == "Vector3" then
+        return {
+            __type="Vector3",
+            x=finiteNumber(v.X),
+            y=finiteNumber(v.Y),
+            z=finiteNumber(v.Z)
+        }
+    elseif t == "Color3" then
+        return {
+            __type="Color3",
+            r=finiteNumber(v.R),
+            g=finiteNumber(v.G),
+            b=finiteNumber(v.B)
+        }
+    elseif t == "CFrame" then
+        local values = {v:GetComponents()}
+        for i = 1, #values do
+            values[i] = finiteNumber(values[i])
+        end
+        return {__type="CFrame",values=values}
+    elseif t == "UDim" then
+        return {
+            __type="UDim",
+            scale=finiteNumber(v.Scale),
+            offset=finiteNumber(v.Offset)
+        }
+    elseif t == "UDim2" then
         return {
             __type="UDim2",
-            xs=v.X.Scale,xo=v.X.Offset,
-            ys=v.Y.Scale,yo=v.Y.Offset
+            xs=finiteNumber(v.X.Scale),
+            xo=finiteNumber(v.X.Offset),
+            ys=finiteNumber(v.Y.Scale),
+            yo=finiteNumber(v.Y.Offset)
         }
-    end
-    if t == "NumberRange" then
-        return {__type="NumberRange",min=v.Min,max=v.Max}
-    end
-    if t == "EnumItem" then
+    elseif t == "NumberRange" then
+        return {
+            __type="NumberRange",
+            min=finiteNumber(v.Min),
+            max=finiteNumber(v.Max)
+        }
+    elseif t == "EnumItem" then
         return {__type="EnumItem",value=tostring(v)}
-    end
-    if t == "BrickColor" then
+    elseif t == "BrickColor" then
         return {__type="BrickColor",number=v.Number,name=v.Name}
-    end
-    if t == "ColorSequence" then
+    elseif t == "ColorSequence" then
         local out = {__type="ColorSequence",keypoints={}}
         for _, k in ipairs(v.Keypoints) do
-            table.insert(out.keypoints,{time=k.Time,color=ser(k.Value)})
+            table.insert(out.keypoints,{
+                time=finiteNumber(k.Time),
+                color=ser(k.Value)
+            })
         end
         return out
-    end
-    if t == "NumberSequence" then
+    elseif t == "NumberSequence" then
         local out = {__type="NumberSequence",keypoints={}}
         for _, k in ipairs(v.Keypoints) do
             table.insert(out.keypoints,{
-                time=k.Time,value=k.Value,envelope=k.Envelope
+                time=finiteNumber(k.Time),
+                value=finiteNumber(k.Value),
+                envelope=finiteNumber(k.Envelope)
             })
         end
         return out
@@ -129,12 +164,17 @@ local function safeGet(obj, prop)
     local ok, value = pcall(function()
         return obj[prop]
     end)
-    if ok then return value end
+
+    if ok then
+        return value
+    end
+
     return nil
 end
 
 local function addProp(tbl, obj, prop, key)
     local value = safeGet(obj, prop)
+
     if value ~= nil then
         tbl[key or prop] = ser(value)
     end
@@ -144,7 +184,12 @@ local function pathOf(obj)
     local ok, full = pcall(function()
         return obj:GetFullName()
     end)
-    return ok and full or obj.Name
+
+    if ok and type(full) == "string" then
+        return full
+    end
+
+    return tostring(obj.Name)
 end
 
 -------------------------------------------------
@@ -195,10 +240,10 @@ local CLASS_PROPS = {
         "RollOffMaxDistance","RollOffMinDistance","RollOffMode","EmitterSize"
     },
     ParticleEmitter={
-        "Texture","Enabled","Rate","Lifetime","Speed","LightEmission",
-        "LightInfluence","LockedToPart","Orientation","Rotation",
-        "RotSpeed","SpreadAngle","VelocityInheritance","Color",
-        "Transparency","Size"
+        "Texture","Enabled","Rate","Lifetime","Speed",
+        "LightEmission","LightInfluence","LockedToPart",
+        "Orientation","Rotation","RotSpeed","SpreadAngle",
+        "VelocityInheritance","Color","Transparency","Size"
     },
     Beam={
         "Texture","TextureLength","TextureMode","TextureSpeed",
@@ -207,8 +252,8 @@ local CLASS_PROPS = {
         "Color","Transparency","Segments"
     },
     Trail={
-        "Texture","TextureLength","TextureMode","Lifetime","MinLength",
-        "FaceCamera","LightEmission","LightInfluence",
+        "Texture","TextureLength","TextureMode","Lifetime",
+        "MinLength","FaceCamera","LightEmission","LightInfluence",
         "Color","Transparency","WidthScale"
     },
     PointLight={"Brightness","Color","Enabled","Range","Shadows"},
@@ -223,16 +268,16 @@ local CLASS_PROPS = {
 }
 
 local function collectProperties(obj)
-    local p = {}
+    local out = {}
 
     for _, prop in ipairs(COMMON_PROPS) do
-        addProp(p,obj,prop)
+        addProp(out,obj,prop)
     end
 
     for className, props in pairs(CLASS_PROPS) do
         if obj:IsA(className) then
             for _, prop in ipairs(props) do
-                addProp(p,obj,prop)
+                addProp(out,obj,prop)
             end
         end
     end
@@ -240,22 +285,23 @@ local function collectProperties(obj)
     if obj:IsA("Model") then
         local primary = safeGet(obj,"PrimaryPart")
         if primary then
-            p.PrimaryPartPath = pathOf(primary)
+            out.PrimaryPartPath = pathOf(primary)
         end
     end
 
-    return p
+    return out
 end
 
 local function collectAttributes(obj)
     local out = {}
+
     local ok, attrs = pcall(function()
         return obj:GetAttributes()
     end)
 
-    if ok then
-        for k, v in pairs(attrs) do
-            out[k] = ser(v)
+    if ok and type(attrs) == "table" then
+        for key, value in pairs(attrs) do
+            out[tostring(key)] = ser(value)
         end
     end
 
@@ -266,7 +312,16 @@ local function collectTags(obj)
     local ok, tags = pcall(function()
         return CollectionService:GetTags(obj)
     end)
-    return ok and tags or {}
+
+    if not ok or type(tags) ~= "table" then
+        return {}
+    end
+
+    local out = {}
+    for _, tag in ipairs(tags) do
+        out[#out + 1] = tostring(tag)
+    end
+    return out
 end
 
 local function isLocalCharacterObject(obj)
@@ -290,9 +345,11 @@ local function readLighting()
     }
 
     local out = {}
+
     for _, prop in ipairs(props) do
         addProp(out,Lighting,prop)
     end
+
     return out
 end
 
@@ -301,12 +358,12 @@ end
 -------------------------------------------------
 local function buildPayload(progress)
     local payload = {
-        format="StudioLiteMapExport",
-        version=3,
-        placeId=game.PlaceId,
-        gameId=game.GameId,
-        placeVersion=game.PlaceVersion,
-        exportedAt=os.time(),
+        format="StudioLiteMapExportLua",
+        version=4,
+        placeId=finiteNumber(game.PlaceId),
+        gameId=finiteNumber(game.GameId),
+        placeVersion=finiteNumber(game.PlaceVersion),
+        exportedAt=finiteNumber(os.time()),
         lighting=readLighting(),
         objects={},
         assets={},
@@ -322,15 +379,15 @@ local function buildPayload(progress)
     local processed = 0
 
     for _, root in ipairs(ROOTS) do
-        local list = root.object:GetDescendants()
+        local descendants = root.object:GetDescendants()
 
-        for _, obj in ipairs(list) do
+        for _, obj in ipairs(descendants) do
             processed += 1
 
             if not isLocalCharacterObject(obj) then
                 table.insert(payload.objects,{
-                    class=obj.ClassName,
-                    name=obj.Name,
+                    class=tostring(obj.ClassName),
+                    name=tostring(obj.Name),
                     path=pathOf(obj),
                     parent=obj.Parent and pathOf(obj.Parent) or nil,
                     root=root.service,
@@ -351,12 +408,14 @@ local function buildPayload(progress)
 
                                 if not assetSeen[key] then
                                     assetSeen[key] = true
+
                                     table.insert(payload.assets,{
                                         class=className,
                                         property=prop,
                                         value=value,
                                         firstPath=pathOf(obj)
                                     })
+
                                     payload.stats.assets += 1
                                 end
                             end
@@ -380,10 +439,154 @@ local function buildPayload(progress)
 end
 
 -------------------------------------------------
--- SALVAMENTO
+-- SERIALIZADOR LUA ASCII-SAFE
+-------------------------------------------------
+local function quoteLuaString(value)
+    value = tostring(value)
+
+    local out = {'"'}
+    local length = #value
+
+    for i = 1, length do
+        local byte = string.byte(value,i)
+
+        if byte == 34 then
+            out[#out + 1] = '\\"'
+        elseif byte == 92 then
+            out[#out + 1] = '\\\\'
+        elseif byte == 10 then
+            out[#out + 1] = '\\n'
+        elseif byte == 13 then
+            out[#out + 1] = '\\r'
+        elseif byte == 9 then
+            out[#out + 1] = '\\t'
+        elseif byte >= 32 and byte <= 126 then
+            out[#out + 1] = string.char(byte)
+        else
+            out[#out + 1] = string.format("\\%03d",byte)
+        end
+    end
+
+    out[#out + 1] = '"'
+    return table.concat(out)
+end
+
+local function validIdentifier(key)
+    return type(key) == "string"
+        and key:match("^[A-Za-z_][A-Za-z0-9_]*$") ~= nil
+end
+
+local function sortedNonArrayKeys(tbl, arrayLength)
+    local keys = {}
+
+    for key in pairs(tbl) do
+        local isArrayKey =
+            type(key) == "number"
+            and key % 1 == 0
+            and key >= 1
+            and key <= arrayLength
+
+        if not isArrayKey then
+            keys[#keys + 1] = key
+        end
+    end
+
+    table.sort(keys,function(a,b)
+        local ta, tb = type(a), type(b)
+
+        if ta == tb then
+            return tostring(a) < tostring(b)
+        end
+
+        return ta < tb
+    end)
+
+    return keys
+end
+
+local function encodeLua(value, output, indent, seen)
+    local t = type(value)
+
+    if t == "nil" then
+        output[#output + 1] = "nil"
+        return
+    elseif t == "boolean" then
+        output[#output + 1] = value and "true" or "false"
+        return
+    elseif t == "number" then
+        output[#output + 1] = tostring(finiteNumber(value))
+        return
+    elseif t == "string" then
+        output[#output + 1] = quoteLuaString(value)
+        return
+    elseif t ~= "table" then
+        output[#output + 1] = quoteLuaString(tostring(value))
+        return
+    end
+
+    if seen[value] then
+        output[#output + 1] = quoteLuaString("<circular-reference>")
+        return
+    end
+
+    seen[value] = true
+
+    local pad = string.rep("    ",indent)
+    local childPad = string.rep("    ",indent + 1)
+    local arrayLength = #value
+    local extraKeys = sortedNonArrayKeys(value,arrayLength)
+
+    output[#output + 1] = "{\n"
+
+    for i = 1, arrayLength do
+        output[#output + 1] = childPad
+        encodeLua(value[i],output,indent + 1,seen)
+        output[#output + 1] = ",\n"
+    end
+
+    for _, key in ipairs(extraKeys) do
+        output[#output + 1] = childPad
+
+        if validIdentifier(key) then
+            output[#output + 1] = key
+        else
+            output[#output + 1] = "["
+            encodeLua(key,output,indent + 1,seen)
+            output[#output + 1] = "]"
+        end
+
+        output[#output + 1] = " = "
+        encodeLua(value[key],output,indent + 1,seen)
+        output[#output + 1] = ",\n"
+    end
+
+    output[#output + 1] = pad
+    output[#output + 1] = "}"
+
+    seen[value] = nil
+end
+
+local function payloadToLua(payload)
+    local output = {
+        "-- Studio Lite Map Export\\n",
+        "-- Generated by Map Exporter Mobile V4\\n",
+        "-- Usage: local data = loadstring(readfile(FILE_PATH))()\\n\\n",
+        "return "
+    }
+
+    encodeLua(payload,output,0,{})
+    output[#output + 1] = "\n"
+
+    return table.concat(output)
+end
+
+-------------------------------------------------
+-- ARQUIVO / CAMINHOS
 -------------------------------------------------
 local function normalizePath(path)
-    return tostring(path):gsub("\\","/"):gsub("//+","/")
+    path = tostring(path):gsub("\\","/")
+    path = path:gsub("//+","/")
+    return path
 end
 
 local function parentPath(path)
@@ -391,16 +594,15 @@ local function parentPath(path)
 end
 
 local function ensureFolder(path)
-    if not API.makefolder or not path or path == "" then
+    if not API.makefolder or type(path) ~= "string" or path == "" then
         return
     end
 
-    -- Primeiro tenta criar o caminho inteiro.
     pcall(API.makefolder,path)
 
-    -- Fallback para caminhos relativos aninhados.
     if path:sub(1,1) ~= "/" then
         local current = ""
+
         for part in path:gmatch("[^/]+") do
             current = current == "" and part or (current.."/"..part)
             pcall(API.makefolder,current)
@@ -408,28 +610,7 @@ local function ensureFolder(path)
     end
 end
 
-local function verifyFile(path,json)
-    if API.isfile then
-        local ok, exists = pcall(API.isfile,path)
-        if not ok or not exists then
-            return false,"isfile não confirmou o arquivo"
-        end
-    end
-
-    if API.readfile then
-        local ok, data = pcall(API.readfile,path)
-        if not ok then
-            return false,"readfile não conseguiu reler o arquivo"
-        end
-        if type(data) ~= "string" or #data ~= #json then
-            return false,"arquivo salvo com tamanho diferente do JSON"
-        end
-    end
-
-    return true
-end
-
-local function addCandidate(list, seen, path, label)
+local function addCandidate(list,seen,path,label)
     if type(path) ~= "string" or path == "" then
         return
     end
@@ -438,70 +619,140 @@ local function addCandidate(list, seen, path, label)
 
     if not seen[path] then
         seen[path] = true
-        table.insert(list,{path=path,label=label})
+        list[#list + 1] = {
+            path=path,
+            label=label
+        }
     end
 end
 
-local function buildSaveCandidates(fileName)
-    local list, seen = {}, {}
-    local folderName = "StudioLiteExports"
+local function buildCandidates(fileName)
+    local list = {}
+    local seen = {}
+    local folder = "StudioLiteExports"
 
-    -- Android externo. Pode falhar por Scoped Storage/permissões do executor.
-    addCandidate(list,seen,
-        "/storage/emulated/0/Download/"..folderName.."/"..fileName,
-        "Download")
-    addCandidate(list,seen,
-        "/sdcard/Download/"..folderName.."/"..fileName,
-        "Download")
-    addCandidate(list,seen,
+    addCandidate(
+        list,seen,
+        "/storage/emulated/0/Download/"..folder.."/"..fileName,
+        "Download"
+    )
+
+    addCandidate(
+        list,seen,
+        "/sdcard/Download/"..folder.."/"..fileName,
+        "Download"
+    )
+
+    addCandidate(
+        list,seen,
         "/storage/emulated/0/Download/"..fileName,
-        "Download")
-    addCandidate(list,seen,
-        "/sdcard/Download/"..fileName,
-        "Download")
+        "Download"
+    )
 
-    -- Caminhos comuns do Delta. Nem toda versão expõe acesso absoluto.
-    addCandidate(list,seen,
-        "/storage/emulated/0/Delta/Workspace/"..folderName.."/"..fileName,
-        "Delta Workspace")
-    addCandidate(list,seen,
+    addCandidate(
+        list,seen,
+        "/sdcard/Download/"..fileName,
+        "Download"
+    )
+
+    addCandidate(
+        list,seen,
+        "/storage/emulated/0/Delta/Workspace/"..folder.."/"..fileName,
+        "Delta Workspace"
+    )
+
+    addCandidate(
+        list,seen,
         "/storage/emulated/0/Delta/Workspace/"..fileName,
-        "Delta Workspace")
+        "Delta Workspace"
+    )
 
     local ws = getWorkspacePath()
+
     if ws then
-        addCandidate(list,seen,ws.."/"..folderName.."/"..fileName,"Workspace")
-        addCandidate(list,seen,ws.."/"..fileName,"Workspace")
+        addCandidate(
+            list,seen,
+            ws.."/"..folder.."/"..fileName,
+            "Workspace"
+        )
+
+        addCandidate(
+            list,seen,
+            ws.."/"..fileName,
+            "Workspace"
+        )
     end
 
-    -- Normalmente o fallback mais compatível com writefile.
-    addCandidate(list,seen,folderName.."/"..fileName,"Sandbox")
-    addCandidate(list,seen,fileName,"Sandbox")
+    addCandidate(
+        list,seen,
+        folder.."/"..fileName,
+        "Executor Workspace"
+    )
+
+    addCandidate(
+        list,seen,
+        fileName,
+        "Executor Workspace"
+    )
 
     return list
 end
 
-local function savePayload(payload)
-    local okEncode, json = pcall(function()
-        return HttpService:JSONEncode(payload)
-    end)
+local function verifyWrite(path,contents)
+    if API.isfile then
+        local ok, exists = pcall(API.isfile,path)
 
-    if not okEncode then
+        if not ok or exists ~= true then
+            return false,"isfile não confirmou o arquivo"
+        end
+    end
+
+    if API.readfile then
+        local ok, data = pcall(API.readfile,path)
+
+        if not ok then
+            return false,"readfile não conseguiu reler o arquivo"
+        end
+
+        if type(data) ~= "string" then
+            return false,"readfile retornou conteúdo inválido"
+        end
+
+        if #data ~= #contents then
+            return false,
+                "tamanho salvo diferente: "
+                ..tostring(#data)
+                .." / "
+                ..tostring(#contents)
+        end
+
+        if data ~= contents then
+            return false,"conteúdo relido diferente do conteúdo exportado"
+        end
+    end
+
+    return true
+end
+
+local function savePayload(payload)
+    local okSerialize, luaSource = pcall(payloadToLua,payload)
+
+    if not okSerialize then
         return false,{
             method="error",
-            message="Falha ao gerar JSON: "..tostring(json),
+            message="Falha ao gerar script Lua: "..tostring(luaSource),
             bytes=0
         }
     end
 
     local stamp = os.date("!%Y%m%d_%H%M%S")
-    local fileName = ("StudioLite_Map_%s_%s.json")
+    local fileName = ("StudioLite_Map_%s_%s.lua")
         :format(tostring(game.PlaceId),stamp)
 
     local errors = {}
 
     if API.writefile then
-        for _, candidate in ipairs(buildSaveCandidates(fileName)) do
+        for _, candidate in ipairs(buildCandidates(fileName)) do
             local path = candidate.path
             local parent = parentPath(path)
 
@@ -509,52 +760,57 @@ local function savePayload(payload)
                 ensureFolder(parent)
             end
 
-            local okWrite, errWrite = pcall(API.writefile,path,json)
+            local okWrite, writeErr = pcall(
+                API.writefile,
+                path,
+                luaSource
+            )
 
             if okWrite then
-                local verified, verifyErr = verifyFile(path,json)
+                local verified, verifyErr = verifyWrite(path,luaSource)
 
                 if verified then
                     return true,{
                         method="file",
                         path=path,
                         label=candidate.label,
-                        bytes=#json,
+                        bytes=#luaSource,
                         verified=(API.isfile ~= nil or API.readfile ~= nil)
                     }
                 end
 
-                table.insert(errors,path.." -> "..tostring(verifyErr))
+                errors[#errors + 1] =
+                    path.." -> "..tostring(verifyErr)
             else
-                table.insert(errors,path.." -> "..tostring(errWrite))
+                errors[#errors + 1] =
+                    path.." -> "..tostring(writeErr)
             end
         end
     else
-        table.insert(errors,"writefile indisponível")
+        errors[#errors + 1] = "writefile indisponível"
     end
 
     if API.setclipboard then
-        local okClip, errClip = pcall(API.setclipboard,json)
+        local okClip, clipErr = pcall(API.setclipboard,luaSource)
 
         if okClip then
             return true,{
                 method="clipboard",
-                bytes=#json,
-                message="Arquivo não pôde ser gravado; JSON copiado para a área de transferência.",
+                bytes=#luaSource,
                 writeErrors=errors
             }
         end
 
-        table.insert(errors,"setclipboard -> "..tostring(errClip))
+        errors[#errors + 1] =
+            "setclipboard -> "..tostring(clipErr)
     end
 
-    print("=== StudioLite Map Export (JSON) ===")
-    print(json)
+    print("=== StudioLite Map Export LUA ===")
+    print(luaSource)
 
     return true,{
         method="console",
-        bytes=#json,
-        message="Nenhuma gravação utilizável; JSON enviado ao console.",
+        bytes=#luaSource,
         writeErrors=errors
     }
 end
@@ -565,18 +821,21 @@ end
 local parent
 
 do
-    if type(globalValue("gethui")) == "function" then
-        local ok, result = pcall(globalValue("gethui"))
+    if API.gethui then
+        local ok, result = pcall(API.gethui)
         if ok and result then
             parent = result
         end
     end
 
     if not parent then
-        local ok, cg = pcall(function()
+        local ok, coreGui = pcall(function()
             return game:GetService("CoreGui")
         end)
-        if ok then parent = cg end
+
+        if ok then
+            parent = coreGui
+        end
     end
 
     if not parent and LocalPlayer then
@@ -589,7 +848,9 @@ if not parent then
 end
 
 local old = parent:FindFirstChild("StudioLiteMapExporter")
-if old then old:Destroy() end
+if old then
+    old:Destroy()
+end
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "StudioLiteMapExporter"
@@ -597,16 +858,24 @@ gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = false
 gui.Parent = parent
 
-local FRAME_W, FRAME_H = 350, 438
+local FRAME_W = 350
+local FRAME_H = 450
 
 local frame = Instance.new("Frame")
 frame.Name = "Main"
 frame.Size = UDim2.fromOffset(FRAME_W,FRAME_H)
-frame.Position = UDim2.new(0.5,-FRAME_W/2,0.5,-FRAME_H/2)
+frame.Position = UDim2.new(
+    0.5,
+    -FRAME_W / 2,
+    0.5,
+    -FRAME_H / 2
+)
 frame.BackgroundColor3 = Color3.fromRGB(20,22,28)
 frame.BorderSizePixel = 0
 frame.Parent = gui
-Instance.new("UICorner",frame).CornerRadius = UDim.new(0,12)
+
+Instance.new("UICorner",frame).CornerRadius =
+    UDim.new(0,12)
 
 local stroke = Instance.new("UIStroke")
 stroke.Color = Color3.fromRGB(65,70,85)
@@ -617,11 +886,12 @@ local top = Instance.new("TextLabel")
 top.Size = UDim2.new(1,-48,0,48)
 top.Position = UDim2.fromOffset(14,0)
 top.BackgroundTransparency = 1
-top.Text = "MAP EXPORTER MOBILE V3"
+top.Text = "MAP EXPORTER MOBILE V4"
 top.TextColor3 = Color3.fromRGB(245,245,250)
 top.TextSize = 18
 top.Font = Enum.Font.GothamBold
 top.TextXAlignment = Enum.TextXAlignment.Left
+top.Active = true
 top.Parent = frame
 
 local close = Instance.new("TextButton")
@@ -633,13 +903,16 @@ close.TextColor3 = Color3.fromRGB(240,240,245)
 close.TextSize = 24
 close.Font = Enum.Font.GothamBold
 close.Parent = frame
-Instance.new("UICorner",close).CornerRadius = UDim.new(0,9)
+
+Instance.new("UICorner",close).CornerRadius =
+    UDim.new(0,9)
+
 close.MouseButton1Click:Connect(function()
     gui:Destroy()
 end)
 
 local info = Instance.new("TextLabel")
-info.Size = UDim2.new(1,-28,0,160)
+info.Size = UDim2.new(1,-28,0,170)
 info.Position = UDim2.fromOffset(14,54)
 info.BackgroundColor3 = Color3.fromRGB(29,32,40)
 info.TextColor3 = Color3.fromRGB(205,210,220)
@@ -649,16 +922,19 @@ info.TextXAlignment = Enum.TextXAlignment.Left
 info.TextYAlignment = Enum.TextYAlignment.Top
 info.TextWrapped = true
 info.Parent = frame
-Instance.new("UICorner",info).CornerRadius = UDim.new(0,9)
+
+Instance.new("UICorner",info).CornerRadius =
+    UDim.new(0,9)
 
 local function apiMark(name)
     return API[name] and "SIM" or "NÃO"
 end
 
-local function buildApiReport()
+local function apiReport()
     local ws = getWorkspacePath()
+
     return table.concat({
-        "APIs:",
+        "Formato: LUA",
         "writefile: "..apiMark("writefile"),
         "readfile: "..apiMark("readfile"),
         "isfile: "..apiMark("isfile"),
@@ -669,33 +945,55 @@ local function buildApiReport()
     },"\n")
 end
 
-local function baseInfoText(objCount,assetCount,statusText)
-    return ("Objetos: %d\nAssets: %d\n%s\nStatus: %s")
-        :format(objCount,assetCount,buildApiReport(),statusText or "pronto")
+local function infoText(objects,assets,statusText)
+    return (
+        "Objetos: %d\n"
+        .."Assets: %d\n"
+        .."%s\n"
+        .."Status: %s"
+    ):format(
+        objects or 0,
+        assets or 0,
+        apiReport(),
+        statusText or "pronto"
+    )
 end
 
-info.Text = baseInfoText(0,0,"pronto")
+info.Text = infoText(0,0,"pronto")
 
-local function makeButton(text,y,color)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(1,-28,0,46)
-    b.Position = UDim2.fromOffset(14,y)
-    b.BackgroundColor3 = color
-    b.TextColor3 = Color3.fromRGB(255,255,255)
-    b.Text = text
-    b.TextSize = 15
-    b.Font = Enum.Font.GothamBold
-    b.Parent = frame
-    Instance.new("UICorner",b).CornerRadius = UDim.new(0,9)
-    return b
+local function createButton(text,y,color)
+    local button = Instance.new("TextButton")
+
+    button.Size = UDim2.new(1,-28,0,46)
+    button.Position = UDim2.fromOffset(14,y)
+    button.BackgroundColor3 = color
+    button.TextColor3 = Color3.fromRGB(255,255,255)
+    button.Text = text
+    button.TextSize = 15
+    button.Font = Enum.Font.GothamBold
+    button.Parent = frame
+
+    Instance.new("UICorner",button).CornerRadius =
+        UDim.new(0,9)
+
+    return button
 end
 
-local scanBtn = makeButton("ESCANEAR MAPA",224,Color3.fromRGB(56,105,245))
-local exportBtn = makeButton("EXPORTAR E SALVAR",278,Color3.fromRGB(46,160,90))
+local scanBtn = createButton(
+    "ESCANEAR MAPA",
+    234,
+    Color3.fromRGB(56,105,245)
+)
+
+local exportBtn = createButton(
+    "EXPORTAR COMO LUA",
+    288,
+    Color3.fromRGB(46,160,90)
+)
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1,-28,0,100)
-status.Position = UDim2.fromOffset(14,332)
+status.Size = UDim2.new(1,-28,0,104)
+status.Position = UDim2.fromOffset(14,342)
 status.BackgroundTransparency = 1
 status.TextWrapped = true
 status.TextColor3 = Color3.fromRGB(155,160,175)
@@ -703,41 +1001,64 @@ status.TextSize = 12
 status.Font = Enum.Font.Gotham
 status.TextXAlignment = Enum.TextXAlignment.Left
 status.TextYAlignment = Enum.TextYAlignment.Top
-status.Text = "Pronto."
+status.Text = "Pronto. O arquivo gerado será .lua."
 status.Parent = frame
 
 -------------------------------------------------
 -- ESTADO
 -------------------------------------------------
 local busy = false
-local lastPayload
+local lastPayload = nil
 
 local function setStatus(text)
     status.Text = tostring(text)
 end
 
 local function refreshStats(payload,label)
-    local oc = payload and payload.stats and payload.stats.objects or 0
-    local ac = payload and payload.stats and payload.stats.assets or 0
-    info.Text = baseInfoText(oc,ac,label)
+    local objects =
+        payload
+        and payload.stats
+        and payload.stats.objects
+        or 0
+
+    local assets =
+        payload
+        and payload.stats
+        and payload.stats.assets
+        or 0
+
+    info.Text = infoText(objects,assets,label)
 end
 
 -------------------------------------------------
 -- SCAN
 -------------------------------------------------
 local function runScan()
-    if busy then return false end
+    if busy then
+        return false
+    end
 
     busy = true
     scanBtn.Text = "ESCANEANDO..."
     exportBtn.Active = false
     exportBtn.AutoButtonColor = false
-    setStatus("Lendo objetos visíveis ao cliente...")
+
+    setStatus("Lendo objetos visíveis...")
 
     local ok, result = pcall(function()
         return buildPayload(function(processed,objects,assets)
-            info.Text = ("Objetos: %d\nAssets: %d\nAnalisando: %d\n%s\nStatus: escaneando")
-                :format(objects,assets,processed,buildApiReport())
+            info.Text = (
+                "Objetos: %d\n"
+                .."Assets: %d\n"
+                .."Analisando: %d\n"
+                .."%s\n"
+                .."Status: escaneando"
+            ):format(
+                objects,
+                assets,
+                processed,
+                apiReport()
+            )
         end)
     end)
 
@@ -764,14 +1085,17 @@ scanBtn.MouseButton1Click:Connect(function()
 end)
 
 -------------------------------------------------
--- EXPORTAR
+-- EXPORTAÇÃO
 -------------------------------------------------
 exportBtn.MouseButton1Click:Connect(function()
-    if busy then return end
+    if busy then
+        return
+    end
 
     task.spawn(function()
         if not lastPayload then
             local scanOk = runScan()
+
             if not scanOk or not lastPayload then
                 return
             end
@@ -779,75 +1103,134 @@ exportBtn.MouseButton1Click:Connect(function()
 
         busy = true
         scanBtn.Active = false
-        exportBtn.Text = "SALVANDO..."
-        setStatus("Gerando JSON e testando locais de gravação...")
+        exportBtn.Text = "GERANDO LUA..."
 
-        local callOk, ok, result = pcall(function()
-            local saveOk, saveResult = savePayload(lastPayload)
-            return saveOk,saveResult
+        setStatus(
+            "Serializando mapa em Lua e testando locais de gravação..."
+        )
+
+        local callOk, saveOk, result = pcall(function()
+            local ok, saveResult = savePayload(lastPayload)
+            return ok,saveResult
         end)
 
         if not callOk then
-            setStatus("ERRO inesperado ao exportar:\n"..tostring(ok))
-            refreshStats(lastPayload,"erro ao salvar")
-        elseif ok and type(result) == "table" then
+            setStatus(
+                "ERRO inesperado:\n"..tostring(saveOk)
+            )
+
+            refreshStats(
+                lastPayload,
+                "erro ao exportar"
+            )
+
+        elseif saveOk and type(result) == "table" then
             if result.method == "file" then
-                local verification = result.verified and "verificado" or "gravado"
+                local state =
+                    result.verified
+                    and "verificado"
+                    or "gravado"
+
                 setStatus(
-                    ("SUCESSO!\n%s\n%s\n%d bytes (%s)")
-                    :format(
+                    (
+                        "SUCESSO!\n"
+                        .."%s\n"
+                        .."%s\n"
+                        .."%d bytes (%s)"
+                    ):format(
                         tostring(result.label or "Arquivo"),
                         tostring(result.path),
                         tonumber(result.bytes) or 0,
-                        verification
+                        state
                     )
                 )
-                refreshStats(lastPayload,"exportado")
+
+                refreshStats(
+                    lastPayload,
+                    "exportado .lua"
+                )
+
             elseif result.method == "clipboard" then
                 setStatus(
-                    ("JSON copiado para a área de transferência.\n%d bytes\nDownload/Workspace não aceitaram gravação.")
-                    :format(tonumber(result.bytes) or 0)
+                    (
+                        "Script Lua copiado para a área de transferência.\n"
+                        .."%d bytes.\n"
+                        .."A gravação em arquivo foi recusada pelo ambiente."
+                    ):format(
+                        tonumber(result.bytes) or 0
+                    )
                 )
-                refreshStats(lastPayload,"clipboard")
+
+                refreshStats(
+                    lastPayload,
+                    "clipboard"
+                )
+
             else
-                local extra = ""
-                if result.writeErrors and #result.writeErrors > 0 then
-                    extra = "\nÚltimo erro: "..tostring(result.writeErrors[#result.writeErrors])
+                local lastError = ""
+
+                if result.writeErrors
+                    and #result.writeErrors > 0
+                then
+                    lastError =
+                        "\nÚltimo erro: "
+                        ..tostring(
+                            result.writeErrors[
+                                #result.writeErrors
+                            ]
+                        )
                 end
+
                 setStatus(
-                    ("JSON enviado ao console (%d bytes).%s")
-                    :format(tonumber(result.bytes) or 0,extra)
+                    (
+                        "Script Lua enviado ao console (%d bytes).%s"
+                    ):format(
+                        tonumber(result.bytes) or 0,
+                        lastError
+                    )
                 )
-                refreshStats(lastPayload,"console")
+
+                refreshStats(
+                    lastPayload,
+                    "console"
+                )
             end
+
         else
-            local message = type(result) == "table"
+            local message =
+                type(result) == "table"
                 and result.message
                 or tostring(result)
-            setStatus("ERRO ao salvar:\n"..tostring(message))
-            refreshStats(lastPayload,"erro ao salvar")
+
+            setStatus(
+                "ERRO ao exportar:\n"
+                ..tostring(message)
+            )
+
+            refreshStats(
+                lastPayload,
+                "erro ao exportar"
+            )
         end
 
-        exportBtn.Text = "EXPORTAR E SALVAR"
+        exportBtn.Text = "EXPORTAR COMO LUA"
         scanBtn.Active = true
         busy = false
     end)
 end)
 
 -------------------------------------------------
--- ARRASTAR
+-- ARRASTAR PAINEL
 -------------------------------------------------
 local dragging = false
-local dragStart
-local startPos
-local activeInput
-
-top.Active = true
+local dragStart = nil
+local startPos = nil
+local activeInput = nil
 
 top.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1
-        or input.UserInputType == Enum.UserInputType.Touch then
-
+        or input.UserInputType == Enum.UserInputType.Touch
+    then
         dragging = true
         activeInput = input
         dragStart = input.Position
@@ -856,32 +1239,42 @@ top.InputBegan:Connect(function(input)
 end)
 
 UIS.InputChanged:Connect(function(input)
-    if not dragging or not dragStart or not startPos then
+    if not dragging
+        or not dragStart
+        or not startPos
+    then
         return
     end
 
-    if activeInput and activeInput.UserInputType == Enum.UserInputType.Touch then
+    if activeInput
+        and activeInput.UserInputType == Enum.UserInputType.Touch
+    then
         if input ~= activeInput then
             return
         end
-    elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then
+    elseif input.UserInputType
+        ~= Enum.UserInputType.MouseMovement
+    then
         return
     end
 
     local delta = input.Position - dragStart
 
     frame.Position = UDim2.new(
-        startPos.X.Scale,startPos.X.Offset + delta.X,
-        startPos.Y.Scale,startPos.Y.Offset + delta.Y
+        startPos.X.Scale,
+        startPos.X.Offset + delta.X,
+        startPos.Y.Scale,
+        startPos.Y.Offset + delta.Y
     )
 end)
 
 UIS.InputEnded:Connect(function(input)
     if input == activeInput
-        or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        or input.UserInputType == Enum.UserInputType.MouseButton1
+    then
         dragging = false
         activeInput = nil
     end
 end)
 
-print("[Studio Lite Map Exporter V3] carregado.")
+print("[Studio Lite Map Exporter V4 LUA] carregado.")
